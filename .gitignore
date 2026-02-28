@@ -1,0 +1,60 @@
+# ============================================================
+# .gitignore — Archivos que NUNCA se suben a GitHub
+# ============================================================
+
+# Credenciales
+.env
+*.env
+secrets.py
+
+# Datos locales / estado runtime
+datos/
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+logs/
+*.log
+
+# Config local sensible
+datos/dashboard_config.json
+datos/bot_activo.json
+datos/alertas_*.json
+datos/ratios_comafi.json
+
+# Archivos de salida local
+*.jsonl
+*.tmp
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Entornos virtuales
+venv/
+env/
+.venv/
+
+# IDEs
+.vscode/
+.idea/
+*.suo
+*.user
+
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Documentos/datasets locales
+ratios_comafi.xlsx
+*.xls
+*.xlsx
