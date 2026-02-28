@@ -1,40 +1,48 @@
 # Bot de Arbitraje CEDEAR/NYSE (Paper Trading)
 
-Proyecto en Python para monitoreo de arbitraje CEDEAR/NYSE, simulacion de cauciones y dashboard operativo.
+Proyecto personal de trading cuantitativo orientado a deteccion de oportunidades entre CEDEARs (BYMA) y NYSE, con simulacion de cauciones y panel operativo en tiempo real.
 
-## Objetivo
+## Resumen Ejecutivo
 
-- Detectar oportunidades de arbitraje entre CEDEARs (BYMA) y NYSE.
-- Simular ejecucion en paper trading con controles de riesgo.
-- Monitorear estado operativo desde dashboard local.
+- Dominio: mercados financieros (Argentina + US).
+- Enfoque: automatizacion, monitoreo y control de riesgo en entorno de paper trading.
+- Objetivo: construir una base tecnica robusta antes de cualquier operativa real.
 
-## Estructura principal
+## Que resuelve
 
-- `bot_principal.py`: orquestador principal.
-- `motor_calculo.py`: logica de calculo de arbitraje.
+- Detecta desvios de precio entre activos equivalentes CEDEAR/NYSE.
+- Evalua cauciones con logica multi-plazo y costo financiero.
+- Centraliza estado operativo en dashboard local para toma de decisiones.
+- Ejecuta chequeos pre-operativos para reducir fallas de entorno.
+
+## Stack Tecnologico
+
+- Lenguaje: Python
+- Datos y persistencia: SQLite, JSON
+- Visualizacion: Dash + Plotly
+- Integraciones: APIs REST + scraping web controlado
+- Automatizacion: scripts de sesion, preflight y monitoreo
+
+## Arquitectura (modulos principales)
+
+- `bot_principal.py`: orquestacion de ciclos operativos.
+- `motor_calculo.py`: calculo de arbitraje CEDEAR/NYSE.
 - `motor_cauciones.py`: analisis/simulacion de cauciones.
-- `ejecutor_paper.py`: ejecucion paper y gestion de capital.
-- `dashboard.py`: interfaz web local (Dash/Plotly).
-- `preflight_operativo.py`: chequeos de readiness.
-- `lanzar_sesion.py`: inicio/parada de procesos.
+- `ejecutor_paper.py`: ejecucion paper con reglas de riesgo.
+- `dashboard.py`: interfaz de monitoreo y control.
+- `preflight_operativo.py`: validaciones criticas antes de operar.
+- `lanzar_sesion.py`: arranque/parada de procesos.
 
-## Variables de entorno requeridas
+## Seguridad y Buenas Practicas
 
-Definir en un archivo `.env` local (no versionado):
+- Credenciales gestionadas por variables de entorno (`.env` local, no versionado).
+- Exclusion de datos sensibles mediante `.gitignore`:
+  - `.env`, `datos/`, `logs/`, `*.db`, archivos temporales.
+- Flujo recomendado antes de publicar:
+  - `git status`
+  - `git diff --cached`
 
-- `IOL_USUARIO`
-- `IOL_PASSWORD`
-- `POLYGON_API_KEY` (opcional segun flujo)
-- `WSP_ALLOWED_FROM` (opcional, bridge WhatsApp)
-- `WSP_REQUIRE_PIN` (opcional)
-- `WSP_PIN` (opcional)
-- `TWILIO_ACCOUNT_SID` (opcional)
-- `TWILIO_AUTH_TOKEN` (opcional)
-- `TWILIO_WHATSAPP_FROM` (opcional)
-- `OPENAI_API_KEY` (opcional)
-- `WSP_AI_MODEL` (opcional)
-
-## Ejecucion local
+## Ejecucion Local (referencia)
 
 ```bash
 python preflight_operativo.py
@@ -42,15 +50,10 @@ python bot_principal.py
 python dashboard.py
 ```
 
-Luego abrir `http://127.0.0.1:8050`.
+Dashboard local: `http://127.0.0.1:8050`
 
-## Seguridad para GitHub
+## Estado del Proyecto
 
-- Este repositorio debe publicarse sin `.env`, bases de datos, logs ni carpeta `datos/`.
-- Revisar siempre el contenido staged antes de hacer `push`:
-  - `git status`
-  - `git diff --cached`
-
-## Estado
-
-Uso orientado a paper trading y pruebas operativas. No constituye recomendacion financiera.
+- Estado actual: activo en paper trading y pruebas operativas.
+- Alcance del repositorio: demostracion tecnica y portfolio profesional.
+- Nota: este proyecto no constituye recomendacion financiera.
