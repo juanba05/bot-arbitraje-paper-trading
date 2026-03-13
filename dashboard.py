@@ -45,8 +45,8 @@ DEFAULTS_CONFIG = {
     "execution_mode":                "paper",
     "real_caucion_enabled":          False,
     "real_caucion_canary_mode":      True,
-    "real_caucion_canary_amount_ars": 1000.0,
-    "real_caucion_max_monto_ars":    5000.0,
+    "real_caucion_canary_amount_ars": 20000.0,
+    "real_caucion_max_monto_ars":    20000.0,
     "umbral_caucion":                20.0,
     "max_capital_caucion_pct":       70.0,
     "ganancia_minima_caucion_pct":   1.5,
@@ -294,12 +294,12 @@ def renderizar_tab(tab, n):
 # ── TAB: TASAS EN VIVO ─────────────────────────────────────────────────────
 
 def _tab_tasas():
-    # Tasas actuales por plazo
+    # Tasas actuales por plazo — tabla: cauciones (fecha_hora, plazo_dias, tasa_anual)
     plazos = [1, 2, 3, 7]
     cards_tasas = []
     for plazo in plazos:
         df = query_db(
-            "SELECT tna, timestamp FROM seniales WHERE plazo=? ORDER BY timestamp DESC LIMIT 1",
+            "SELECT tasa_anual, fecha_hora FROM cauciones WHERE plazo_dias=? ORDER BY fecha_hora DESC LIMIT 1",
             (plazo,)
         )
         if df.empty:
@@ -307,10 +307,10 @@ def _tab_tasas():
             color   = TEXT_MUTED
             sub     = "—"
         else:
-            tna = float(df.iloc[0]["tna"])
+            tna = float(df.iloc[0]["tasa_anual"])
             tna_str = f"{tna:.2f}%"
             color   = GREEN if tna > 80 else (BLUE if tna > 50 else TEXT)
-            ts = df.iloc[0].get("timestamp", "")
+            ts  = str(df.iloc[0].get("fecha_hora", ""))
             sub = f"Último dato: {ts[:16] if ts else '—'}"
 
         cards_tasas.append(
@@ -330,12 +330,12 @@ def _tab_tasas():
             })
         )
 
-    # Histórico de tasas (últimos 7 días)
+    # Histórico de tasas (últimos 7 días) — tabla: cauciones
     df_hist = query_db("""
-        SELECT plazo, tna, timestamp
-        FROM seniales
-        WHERE timestamp >= datetime('now', '-7 days')
-        ORDER BY timestamp ASC
+        SELECT plazo_dias, tasa_anual, fecha_hora
+        FROM cauciones
+        WHERE fecha_hora >= datetime('now', '-7 days')
+        ORDER BY fecha_hora ASC
     """)
 
     fig = go.Figure()
@@ -352,12 +352,12 @@ def _tab_tasas():
 
     colores_plazo = {1: BLUE, 2: GREEN, 3: YELLOW, 7: PURPLE}
     if not df_hist.empty:
-        df_hist["timestamp"] = pd.to_datetime(df_hist["timestamp"], errors="coerce")
+        df_hist["fecha_hora"] = pd.to_datetime(df_hist["fecha_hora"], errors="coerce")
         for plazo, color in colores_plazo.items():
-            sub = df_hist[df_hist["plazo"] == plazo].dropna(subset=["timestamp"])
+            sub = df_hist[df_hist["plazo_dias"] == plazo].dropna(subset=["fecha_hora"])
             if not sub.empty:
                 fig.add_trace(go.Scatter(
-                    x=sub["timestamp"], y=sub["tna"],
+                    x=sub["fecha_hora"], y=sub["tasa_anual"],
                     mode="lines+markers",
                     name=f"{plazo}D",
                     line={"color": color, "width": 2},
@@ -385,20 +385,20 @@ def _tab_tasas():
 def _tab_operaciones():
     secciones = []
 
-    # Cauciones REALES activas
+    # Cauciones REALES activas — tabla: cauciones_ordenes_real
     df_real = query_db("""
         SELECT ciclo_id, plazo_dias, tna_objetivo, monto_objetivo,
-               estado, timestamp_creacion, id_transaccion
+               estado, timestamp, broker_order_id
         FROM cauciones_ordenes_real
         WHERE estado IN ('COLOCADA','CONFIRMADA','FILLED','PENDIENTE')
-        ORDER BY timestamp_creacion DESC
+        ORDER BY timestamp DESC
         LIMIT 20
     """)
 
     filas_real = []
     for _, row in df_real.iterrows():
-        ts = str(row.get("timestamp_creacion", ""))[:16]
-        plazo = int(row.get("plazo_dias", 1))
+        ts    = str(row.get("timestamp", ""))[:16]
+        plazo = int(row.get("plazo_dias", 1) or 1)
         try:
             devolucion = (datetime.fromisoformat(ts) + timedelta(days=plazo)).strftime("%d/%m/%Y")
         except Exception:
@@ -456,22 +456,24 @@ def _tab_operaciones():
             "marginBottom": "16px",
         }))
 
-    # Operaciones PAPER recientes
+    # Operaciones PAPER recientes — tabla: cauciones_simuladas (tiene_senal=1)
     df_paper = query_db("""
-        SELECT fecha, tasa_anual, plazo, monto, ganancia_estimada, estado
-        FROM operaciones_paper
-        ORDER BY fecha DESC
+        SELECT timestamp, plazo_dias, tna_mercado, capital_usado,
+               ganancia_neta, estado
+        FROM cauciones_simuladas
+        WHERE tiene_senal = 1
+        ORDER BY timestamp DESC
         LIMIT 20
     """)
 
     filas_paper = []
     for _, row in df_paper.iterrows():
-        fecha  = str(row.get("fecha", ""))[:16]
-        plazo  = int(row.get("plazo", 1) or 1)
-        monto  = float(row.get("monto", 0) or 0)
-        tna    = float(row.get("tasa_anual", 0) or 0)
-        gan    = float(row.get("ganancia_estimada", 0) or 0)
-        estado = str(row.get("estado", ""))
+        fecha  = str(row.get("timestamp", ""))[:16]
+        plazo  = int(row.get("plazo_dias", 1) or 1)
+        monto  = float(row.get("capital_usado", 0) or 0)
+        tna    = float(row.get("tna_mercado", 0) or 0)
+        gan    = float(row.get("ganancia_neta", 0) or 0)
+        estado = str(row.get("estado", "SIMULADA"))
         filas_paper.append(html.Tr([
             html.Td(fecha,           style={"color": TEXT_MUTED, "padding": "8px 12px"}),
             html.Td(f"{plazo}D",     style={"padding": "8px 12px"}),
@@ -502,9 +504,11 @@ def _tab_operaciones():
 # ── TAB: SEÑALES ──────────────────────────────────────────────────────────
 
 def _tab_seniales():
+    # Señales — tabla: cauciones_simuladas
     df = query_db("""
-        SELECT timestamp, plazo, tna, tiene_senal, umbral_usado
-        FROM seniales
+        SELECT timestamp, plazo_dias, tna_mercado, tiene_senal,
+               promedio_historico, desviacion_pct
+        FROM cauciones_simuladas
         WHERE timestamp >= datetime('now', '-30 days')
         ORDER BY timestamp DESC
         LIMIT 200
@@ -530,16 +534,16 @@ def _tab_seniales():
 
         if not sin_senal.empty:
             fig_scatter.add_trace(go.Scatter(
-                x=sin_senal["timestamp"], y=sin_senal["tna"],
+                x=sin_senal["timestamp"], y=sin_senal["tna_mercado"],
                 mode="markers", name="Sin señal",
                 marker={"color": TEXT_MUTED, "size": 5, "opacity": 0.5},
             ))
         if not con_senal.empty:
             fig_scatter.add_trace(go.Scatter(
-                x=con_senal["timestamp"], y=con_senal["tna"],
+                x=con_senal["timestamp"], y=con_senal["tna_mercado"],
                 mode="markers", name="SEÑAL",
                 marker={"color": GREEN, "size": 10, "symbol": "star"},
-                text=[f"Plazo {p}D — {t:.2f}%" for p, t in zip(con_senal["plazo"], con_senal["tna"])],
+                text=[f"Plazo {p}D — {t:.2f}%" for p, t in zip(con_senal["plazo_dias"], con_senal["tna_mercado"])],
                 hoverinfo="text+x",
             ))
     else:
@@ -553,23 +557,25 @@ def _tab_seniales():
     filas = []
     if not df.empty:
         for _, row in df.head(50).iterrows():
-            ts      = str(row.get("timestamp", ""))[:16]
-            plazo   = row.get("plazo", "?")
-            tna     = row.get("tna", 0)
-            senal   = bool(row.get("tiene_senal", 0))
-            umbral  = row.get("umbral_usado", "")
+            ts     = str(row.get("timestamp", ""))[:16]
+            plazo  = row.get("plazo_dias", "?")
+            tna    = row.get("tna_mercado", 0)
+            senal  = bool(row.get("tiene_senal", 0))
+            prom   = row.get("promedio_historico", "")
+            desvio = row.get("desviacion_pct", "")
             filas.append(html.Tr([
                 html.Td(ts,                style={"color": TEXT_MUTED, "padding": "6px 12px"}),
                 html.Td(f"{plazo}D",       style={"padding": "6px 12px"}),
                 html.Td(fmt_pct(tna),      style={"color": BLUE, "padding": "6px 12px"}),
                 html.Td(badge("SEÑAL", GREEN) if senal else badge("—", TEXT_MUTED), style={"padding": "6px 12px"}),
-                html.Td(fmt_pct(umbral) if umbral else "—", style={"color": TEXT_MUTED, "padding": "6px 12px"}),
+                html.Td(fmt_pct(prom) if prom else "—", style={"color": TEXT_MUTED, "padding": "6px 12px"}),
+                html.Td(fmt_pct(desvio) if desvio else "—", style={"color": TEXT_MUTED, "padding": "6px 12px"}),
             ]))
 
     tabla = html.Table([
         html.Thead(html.Tr([
             html.Th(h, style={"color": TEXT_MUTED, "padding": "8px 12px", "textAlign": "left", "fontWeight": "600", "fontSize": "12px"})
-            for h in ["Fecha", "Plazo", "TNA", "Estado", "Umbral"]
+            for h in ["Fecha", "Plazo", "TNA", "Estado", "Prom. histórico", "Desvío %"]
         ])),
         html.Tbody(filas if filas else [
             html.Tr([html.Td("Sin datos", colSpan=5, style={"color": TEXT_MUTED, "padding": "16px 12px", "textAlign": "center"})])

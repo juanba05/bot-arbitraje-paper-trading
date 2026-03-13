@@ -31,8 +31,8 @@ RUTA_DB     = os.path.join(RUTA_DATOS, NOMBRE_DB)
 DEFAULTS_REAL = {
     "real_caucion_enabled":          False,
     "real_caucion_canary_mode":      True,
-    "real_caucion_canary_amount_ars": 1000.0,
-    "real_caucion_max_monto_ars":    5000.0,
+    "real_caucion_canary_amount_ars": 20000.0,
+    "real_caucion_max_monto_ars":    20000.0,
     "real_caucion_headless":         False,
 }
 
