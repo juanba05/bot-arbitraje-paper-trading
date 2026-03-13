@@ -1,18 +1,20 @@
 """
 ejecutor_real_caucion.py
 ------------------------
-Ejecucion real de cauciones con guardas de seguridad e idempotencia.
+Punto de entrada para ejecucion real de cauciones.
+Delega en ejecutor_selenium_caucion.py para el flujo web de IOL.
 
-Estado actual:
-  - El flujo CPD fue descartado: corresponde a cheques de pago diferido.
-  - La caucion real de IOL se confirmo como flujo web:
-      /Operar/Caucionar -> /Operar/ConfirmarCaucion -> /Operar/CaucionExitosa
-  - Falta automatizacion de navegador para completar ese flujo.
+Guardas de seguridad:
+  - real_caucion_enabled debe ser True en dashboard_config.json
+  - Idempotencia por ciclo_id (una sola orden por ciclo)
+  - Monto maximo configurable
+  - Modo canario para pruebas con monto minimo
 """
 
 import json
 import os
 import sqlite3
+import logging
 
 from config import RUTA_DATOS, NOMBRE_DB, COMISION_CAUCION_PCT
 from ejecutor_paper import capital_disponible
@@ -21,71 +23,48 @@ from motor_cauciones import (
     actualizar_orden_real_caucion,
 )
 
+log = logging.getLogger("ejecutor_real")
+
 RUTA_CONFIG = os.path.join(RUTA_DATOS, "dashboard_config.json")
-RUTA_DB = os.path.join(RUTA_DATOS, NOMBRE_DB)
+RUTA_DB     = os.path.join(RUTA_DATOS, NOMBRE_DB)
 
 DEFAULTS_REAL = {
-    "real_caucion_enabled": False,
-    "real_caucion_backend": "web",
-    "real_caucion_canary_mode": True,
+    "real_caucion_enabled":          False,
+    "real_caucion_canary_mode":      True,
     "real_caucion_canary_amount_ars": 1000.0,
-    "real_caucion_max_monto_ars": 5000.0,
-    "real_caucion_browser": "edge",
-    "real_caucion_headless": False,
+    "real_caucion_max_monto_ars":    5000.0,
+    "real_caucion_headless":         False,
 }
 
 ESTADOS_IDEMPOTENTES = {
-    "PENDIENTE_ENVIO",
-    "ENVIADA",
-    "ENVIADA_SIN_ID",
-    "PENDIENTE",
-    "CONFIRMADA",
-    "FILLED",
-    "PARCIAL",
+    "PENDIENTE_ENVIO", "ENVIADA", "ENVIADA_SIN_ID",
+    "PENDIENTE", "CONFIRMADA", "FILLED", "PARCIAL", "COLOCADA",
 }
 
 
-def _cargar_cfg():
+def _cfg():
     cfg = {}
     if os.path.exists(RUTA_CONFIG):
         try:
             with open(RUTA_CONFIG, encoding="utf-8") as f:
                 cfg = json.load(f)
         except Exception:
-            cfg = {}
+            pass
     for k, v in DEFAULTS_REAL.items():
         cfg.setdefault(k, v)
     return cfg
 
 
-def _safe_float(v, default=0.0):
-    try:
-        return float(v)
-    except Exception:
-        return float(default)
-
-
-def _safe_int(v, default=0):
-    try:
-        return int(v)
-    except Exception:
-        return int(default)
-
-
-def _ya_hay_orden_para_ciclo(ciclo_id):
+def _ya_ejecutado_en_ciclo(ciclo_id):
     if not ciclo_id:
         return False
     try:
         conn = sqlite3.connect(RUTA_DB)
-        cur = conn.cursor()
-        marks = ",".join(["?"] * len(ESTADOS_IDEMPOTENTES))
+        cur  = conn.cursor()
+        marks  = ",".join(["?"] * len(ESTADOS_IDEMPOTENTES))
         params = [str(ciclo_id)] + list(ESTADOS_IDEMPOTENTES)
         cur.execute(
-            f"""
-            SELECT COUNT(*) FROM cauciones_ordenes_real
-            WHERE ciclo_id=?
-              AND estado IN ({marks})
-            """,
+            f"SELECT COUNT(*) FROM cauciones_ordenes_real WHERE ciclo_id=? AND estado IN ({marks})",
             params,
         )
         n = int(cur.fetchone()[0] or 0)
@@ -99,103 +78,103 @@ def _monto_objetivo(cfg, forzar_todo=False):
     disp = max(0.0, capital_disponible())
     if disp <= 0:
         return 0.0
-    if forzar_todo:
+    if bool(cfg.get("real_caucion_canary_mode", True)):
+        base = min(disp, float(cfg.get("real_caucion_canary_amount_ars", 1000.0)))
+    elif forzar_todo:
         base = disp
-    elif bool(cfg.get("real_caucion_canary_mode", True)):
-        base = min(disp, _safe_float(cfg.get("real_caucion_canary_amount_ars", 1000.0), 1000.0))
     else:
-        pct = _safe_float(cfg.get("max_capital_caucion_pct", 70.0), 70.0)
-        pct = max(0.0, min(100.0, pct))
-        base = disp * (pct / 100.0)
-    max_monto = _safe_float(cfg.get("real_caucion_max_monto_ars", 5000.0), 5000.0)
-    if max_monto > 0:
-        base = min(base, max_monto)
-    return round(max(0.0, base), 2)
+        pct  = float(cfg.get("max_capital_caucion_pct", 70.0))
+        base = disp * min(max(pct, 0.0), 100.0) / 100.0
+    tope = float(cfg.get("real_caucion_max_monto_ars", 5000.0))
+    return round(min(base, tope) if tope > 0 else base, 2)
 
 
-def _estimar_ganancia_neta(monto, tna, plazo):
-    gan_bruta = float(monto) * (float(tna) / 100.0) * (max(1, int(plazo)) / 365.0)
-    comision = float(monto) * (COMISION_CAUCION_PCT / 100.0)
-    return round(gan_bruta - comision, 2)
+def _ganancia_estimada(monto, tna, plazo):
+    gan  = float(monto) * (float(tna) / 100.0) * (max(1, int(plazo)) / 365.0)
+    com  = float(monto) * (COMISION_CAUCION_PCT / 100.0)
+    return round(gan - com, 2)
 
 
 def ejecutar_caucion_real(resultado_caucion, ciclo_id, forzar_todo=False):
     """
-    Punto de entrada para operativa real de caucion.
+    Ejecuta una caucion real via Selenium.
 
-    El backend CPD fue eliminado porque no corresponde a cauciones.
-    Hasta implementar automatizacion web real, el modulo deja trazabilidad
-    y devuelve un bloqueo explicito, evitando intentos contra endpoints falsos.
+    Parametros:
+        resultado_caucion : dict devuelto por analizar_cauciones()
+        ciclo_id          : string unico por ciclo (para idempotencia)
+        forzar_todo       : True = usar todo el capital disponible
+
+    Devuelve dict con: ok, estado, detalle, ganancia_neta_real
     """
-    cfg = _cargar_cfg()
+    cfg = _cfg()
+
+    # ── Guardia 1: kill switch ──────────────────────────────────
     if not bool(cfg.get("real_caucion_enabled", False)):
-        return {"ok": False, "estado": "BLOQUEADA_CONFIG", "detalle": "real_caucion_enabled=false"}
+        return {"ok": False, "estado": "BLOQUEADA_CONFIG",
+                "detalle": "real_caucion_enabled=false en dashboard_config.json"}
 
-    if _ya_hay_orden_para_ciclo(ciclo_id):
-        return {"ok": False, "estado": "BLOQUEADA_IDEMPOTENCIA", "detalle": f"ciclo_id duplicado: {ciclo_id}"}
+    # ── Guardia 2: idempotencia ─────────────────────────────────
+    if _ya_ejecutado_en_ciclo(ciclo_id):
+        return {"ok": False, "estado": "BLOQUEADA_IDEMPOTENCIA",
+                "detalle": f"Ya existe una orden para el ciclo: {ciclo_id}"}
 
+    # ── Guardia 3: señal valida ─────────────────────────────────
     if not resultado_caucion or not bool(resultado_caucion.get("tiene_senal")):
         return {"ok": False, "estado": "SIN_SENAL"}
 
-    plazo = _safe_int(resultado_caucion.get("plazo"), 1)
-    tna = _safe_float(resultado_caucion.get("tna", resultado_caucion.get("tasa", 0.0)), 0.0)
+    plazo = int(resultado_caucion.get("plazo", 1))
+    tna   = float(resultado_caucion.get("tna", resultado_caucion.get("tasa", 0.0)))
     if tna <= 0:
         return {"ok": False, "estado": "TASA_INVALIDA"}
 
     monto = _monto_objetivo(cfg, forzar_todo=forzar_todo)
     if monto <= 0:
-        return {"ok": False, "estado": "SIN_CAPITAL"}
+        return {"ok": False, "estado": "SIN_CAPITAL",
+                "detalle": "Capital disponible insuficiente"}
 
-    backend = str(cfg.get("real_caucion_backend", "web")).lower().strip() or "web"
-    payload = {
-        "backend": backend,
-        "monto_objetivo": monto,
-        "plazo_dias": plazo,
-        "tna_objetivo": tna,
-        "flujo_web_confirmado": [
-            "/Operar/Caucionar",
-            "/Operar/ConfirmarCaucion",
-            "/Operar/CaucionExitosa",
-        ],
-    }
-    orden_local_id = registrar_intento_orden_real_caucion(
-        ciclo_id=ciclo_id,
-        plazo_dias=plazo,
-        tna_objetivo=tna,
-        monto_objetivo=monto,
-        execution_mode="real",
-        source="BOT_PRINCIPAL",
-        request_payload=payload,
+    # ── Registrar intento ───────────────────────────────────────
+    orden_id = registrar_intento_orden_real_caucion(
+        ciclo_id       = ciclo_id,
+        plazo_dias     = plazo,
+        tna_objetivo   = tna,
+        monto_objetivo = monto,
+        execution_mode = "real",
+        source         = "BOT_PRINCIPAL",
+        request_payload= {"monto": monto, "plazo": plazo, "tna": tna},
     )
 
-    if backend != "web":
-        detalle = f"Backend real_caucion_backend={backend} no soportado. Usar 'web'."
-        actualizar_orden_real_caucion(
-            orden_real_id=orden_local_id,
-            estado="BACKEND_INVALIDO",
-            mensaje_error=detalle,
-            response_payload=payload,
+    # ── Ejecutar via Selenium ───────────────────────────────────
+    try:
+        from ejecutor_selenium_caucion import ejecutar_caucion_selenium
+        headless = bool(cfg.get("real_caucion_headless", False))
+        resultado = ejecutar_caucion_selenium(
+            monto      = monto,
+            plazo      = plazo,
+            tna_minima = tna,
+            headless   = headless,
         )
-        return {"ok": False, "estado": "BACKEND_INVALIDO", "detalle": detalle}
+    except Exception as e:
+        actualizar_orden_real_caucion(
+            orden_real_id   = orden_id,
+            estado          = "ERROR_SELENIUM",
+            mensaje_error   = str(e),
+            response_payload= {},
+        )
+        return {"ok": False, "estado": "ERROR_SELENIUM", "detalle": str(e)}
 
-    detalle = (
-        "Ruta CPD eliminada. La caucion real en IOL es un flujo web "
-        "(/Operar/Caucionar -> /Operar/ConfirmarCaucion -> /Operar/CaucionExitosa). "
-        "Falta automatizacion de navegador para completar ese flujo."
-    )
+    # ── Guardar resultado ───────────────────────────────────────
+    estado_db = "COLOCADA" if resultado.get("ok") else resultado.get("estado", "ERROR")
     actualizar_orden_real_caucion(
-        orden_real_id=orden_local_id,
-        estado="PENDIENTE_AUTOMATIZACION_WEB",
-        mensaje_error=detalle,
-        response_payload={
-            "detalle": detalle,
-            "ganancia_neta_estimativa": _estimar_ganancia_neta(monto, tna, plazo),
-            "browser_sugerido": cfg.get("real_caucion_browser", "edge"),
-            "headless": bool(cfg.get("real_caucion_headless", False)),
-        },
+        orden_real_id   = orden_id,
+        estado          = estado_db,
+        id_transaccion  = resultado.get("id_op"),
+        mensaje_error   = None if resultado.get("ok") else resultado.get("detalle"),
+        response_payload= resultado,
     )
-    return {
-        "ok": False,
-        "estado": "PENDIENTE_AUTOMATIZACION_WEB",
-        "detalle": detalle,
-    }
+
+    if resultado.get("ok"):
+        gan = _ganancia_estimada(monto, tna, plazo)
+        resultado["ganancia_neta_real"] = gan
+        log.info(f"  Caucion real colocada. Ganancia estimada: ARS {gan:.2f}")
+
+    return resultado
