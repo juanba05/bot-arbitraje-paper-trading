@@ -44,7 +44,7 @@ def crear_driver(headless=False):
     options.add_argument("--window-size=1280,900")
     if headless:
         options.add_argument("--headless=new")
-    driver = uc.Chrome(options=options, version_main=None)
+    driver = uc.Chrome(options=options, version_main=145)
     driver.implicitly_wait(5)
     return driver
 
@@ -172,162 +172,137 @@ def colocar_caucion(driver, monto, plazo, tna_minima=None):
     """
     Navega al formulario de caucion, lo completa y confirma.
 
-    Parametros:
-        driver     : Chrome driver ya logueado
-        monto      : monto en pesos a colocar (ej: 10000.0)
-        plazo      : dias habiles (1, 2 o 3)
-        tna_minima : tasa minima aceptable (opcional, ej: 25.0 para 25% TNA)
+    Campos confirmados via discovery (13/03/2026):
+        Monto    -> name='Monto'  id='textmonto'
+        Plazo    -> SELECT name='IdPlazo' id='IdPlazo'
+        TNA      -> name='Tna'   id='Tna'
+        Moneda   -> radio id='moneda-ars'
+        Modalidad-> radio id='minimal_price'  (precio minimo = tna minima)
+        Submit   -> id='btnEnviar'
 
-    Devuelve dict con:
-        ok      : True si la caucion se coloco
-        estado  : descripcion del resultado
-        detalle : texto adicional
-        id_op   : ID de la operacion en IOL (si se pudo parsear)
+    Devuelve dict con: ok, estado, detalle, id_op
     """
+    from selenium.webdriver.support.ui import Select
+
     wait = WebDriverWait(driver, TIMEOUT)
 
-    # ── 1. Ir a la pagina de caucionar ──────────────────────────
+    # ── 1. Navegar al formulario ─────────────────────────────────
     log.info("  Navegando a /Operar/Caucionar...")
     driver.get(f"{BASE_URL}/Operar/Caucionar")
-
-    # Esperar que NO sea la pagina de login
     try:
         wait.until(lambda d: "Login" not in d.current_url)
     except TimeoutException:
-        log.error("  Redireccion al login — sesion expirada.")
         _screenshot(driver, "caucion_redir_login")
-        return {"ok": False, "estado": "SESION_EXPIRADA", "detalle": "Redireccion a login al abrir Caucionar"}
+        return {"ok": False, "estado": "SESION_EXPIRADA",
+                "detalle": "Redireccion a login al abrir Caucionar"}
 
-    # Esperar que cargue el contenido del formulario (esperar a que desaparezca spinner o aparezca form)
-    time.sleep(2)  # margen para JS del formulario
+    # Esperar que el campo monto este presente en el DOM
+    try:
+        wait.until(EC.presence_of_element_located((By.ID, "textmonto")))
+    except TimeoutException:
+        _screenshot(driver, "caucion_form_no_cargo")
+        _guardar_html_diagnostico(driver, "caucion_form_no_cargo")
+        return {"ok": False, "estado": "FORMULARIO_NO_CARGADO",
+                "detalle": "Campo #textmonto no aparecio en el DOM"}
+
+    time.sleep(1)
     _screenshot(driver, "caucion_form_cargado")
 
-    # ── 2. Buscar campo MONTO ────────────────────────────────────
-    campo_monto = _buscar_campo(driver, [
-        "Monto", "monto", "Importe", "importe", "Capital", "capital",
-        "MontoColocar", "montoColocar", "Amount", "amount",
-    ])
-    if not campo_monto:
-        log.error("  No se encontro el campo de monto en el formulario.")
-        _screenshot(driver, "caucion_sin_campo_monto")
-        # Guardar HTML para diagnostico
-        _guardar_html_diagnostico(driver, "caucion_html")
-        return {"ok": False, "estado": "CAMPO_MONTO_NO_ENCONTRADO",
-                "detalle": "Ver screenshot y caucion_html.txt en datos/screenshots/"}
+    # ── 2. Seleccionar moneda ARS ────────────────────────────────
+    try:
+        radio_ars = driver.find_element(By.ID, "moneda-ars")
+        if not radio_ars.is_selected():
+            radio_ars.click()
+            log.info("  Moneda ARS seleccionada.")
+    except NoSuchElementException:
+        log.warning("  Radio moneda-ars no encontrado — continuando.")
 
-    log.info(f"  Campo monto encontrado: name='{campo_monto.get_attribute('name')}' id='{campo_monto.get_attribute('id')}'")
+    # ── 3. Ingresar MONTO ────────────────────────────────────────
+    campo_monto = driver.find_element(By.ID, "textmonto")
     campo_monto.clear()
     campo_monto.send_keys(str(int(monto)))
+    log.info(f"  Monto ingresado: {int(monto)}")
 
-    # ── 3. Buscar campo PLAZO ────────────────────────────────────
-    campo_plazo = _buscar_campo(driver, [
-        "Plazo", "plazo", "PlazoColocar", "plazoColocar", "Days", "days",
-        "DiasColocar", "dias",
-    ])
-    if campo_plazo:
-        log.info(f"  Campo plazo encontrado: name='{campo_plazo.get_attribute('name')}'")
-        campo_plazo.clear()
-        campo_plazo.send_keys(str(int(plazo)))
-    else:
-        # Algunos formularios usan un select o botones de radio para el plazo
-        log.info("  Campo plazo no encontrado como input — buscando select o radio...")
-        _seleccionar_plazo_alternativo(driver, plazo)
+    # ── 4. Seleccionar PLAZO ─────────────────────────────────────
+    try:
+        select_plazo = Select(driver.find_element(By.ID, "IdPlazo"))
+        select_plazo.select_by_value(str(plazo))
+        log.info(f"  Plazo seleccionado: {plazo}")
+    except Exception as e:
+        log.warning(f"  No se pudo seleccionar plazo={plazo}: {e}")
 
-    # ── 4. Tasa minima (opcional) ────────────────────────────────
+    # ── 5. Seleccionar modalidad precio minimo (ingresa TNA) ─────
+    try:
+        radio_min = driver.find_element(By.ID, "minimal_price")
+        if not radio_min.is_selected():
+            radio_min.click()
+            log.info("  Modalidad 'precio minimo' (TNA minima) seleccionada.")
+        time.sleep(0.5)  # esperar que aparezca el campo Tna
+    except NoSuchElementException:
+        log.warning("  Radio minimal_price no encontrado — continuando.")
+
+    # ── 6. Ingresar TNA minima ───────────────────────────────────
     if tna_minima is not None:
-        campo_tasa = _buscar_campo(driver, [
-            "TasaMinima", "tasaMinima", "Tasa", "tasa", "Rate", "rate",
-            "TasaColocar", "tasaColocar",
-        ])
-        if campo_tasa:
-            log.info(f"  Campo tasa encontrado: name='{campo_tasa.get_attribute('name')}'")
-            campo_tasa.clear()
-            campo_tasa.send_keys(str(tna_minima).replace(".", ","))
+        try:
+            campo_tna = driver.find_element(By.ID, "Tna")
+            campo_tna.clear()
+            campo_tna.send_keys(str(tna_minima).replace(".", ","))
+            log.info(f"  TNA minima ingresada: {tna_minima}")
+        except NoSuchElementException:
+            log.warning("  Campo Tna no encontrado — se omite tna_minima.")
 
     _screenshot(driver, "caucion_form_completo")
 
-    # ── 5. Enviar el formulario ──────────────────────────────────
-    boton_submit = _buscar_boton(driver, [
-        "Caucionar", "Colocar", "Confirmar", "Enviar", "Continuar",
-        "caucionar", "colocar", "confirmar",
-    ])
-    if not boton_submit:
-        # Ultimo recurso: buscar cualquier button de tipo submit
+    # ── 7. Submit ────────────────────────────────────────────────
+    try:
+        boton_submit = driver.find_element(By.ID, "btnEnviar")
+    except NoSuchElementException:
+        # Fallback: primer submit del formulario
         try:
-            boton_submit = driver.find_element(
-                By.CSS_SELECTOR, 'button[type="submit"], input[type="submit"]'
-            )
+            boton_submit = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"], input[type="submit"]')
         except NoSuchElementException:
-            pass
+            _screenshot(driver, "caucion_sin_boton")
+            return {"ok": False, "estado": "BOTON_SUBMIT_NO_ENCONTRADO"}
 
-    if not boton_submit:
-        log.error("  No se encontro el boton de envio.")
-        _screenshot(driver, "caucion_sin_boton")
-        return {"ok": False, "estado": "BOTON_SUBMIT_NO_ENCONTRADO",
-                "detalle": "Ver screenshot en datos/screenshots/"}
-
-    log.info(f"  Haciendo click en boton de submit...")
+    log.info("  Enviando formulario...")
     boton_submit.click()
 
-    # ── 6. Manejar pagina de CONFIRMACION ───────────────────────
+    # ── 8. Pagina de CONFIRMACION ────────────────────────────────
     try:
         wait.until(lambda d: "Confirmar" in d.current_url or "Exitosa" in d.current_url)
     except TimeoutException:
-        log.error("  Timeout esperando pagina de confirmacion.")
         _screenshot(driver, "caucion_post_submit")
         return {"ok": False, "estado": "TIMEOUT_CONFIRMACION",
                 "detalle": f"URL actual: {driver.current_url}"}
 
     if "ConfirmarCaucion" in driver.current_url:
-        log.info("  Pagina de confirmacion detectada. Confirmando...")
+        log.info("  Pagina de confirmacion. Confirmando...")
         _screenshot(driver, "caucion_confirmar")
-
-        boton_confirmar = _buscar_boton(driver, [
-            "Confirmar", "confirmar", "Aceptar", "aceptar", "Si", "OK",
-        ])
-        if not boton_confirmar:
-            try:
-                boton_confirmar = driver.find_element(
-                    By.CSS_SELECTOR, 'button[type="submit"], input[type="submit"]'
-                )
-            except NoSuchElementException:
-                pass
-
-        if not boton_confirmar:
-            log.error("  No se encontro el boton de confirmacion.")
+        try:
+            btn_conf = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"], input[type="submit"]')
+            btn_conf.click()
+        except NoSuchElementException:
             _screenshot(driver, "caucion_sin_boton_confirmar")
             return {"ok": False, "estado": "BOTON_CONFIRMAR_NO_ENCONTRADO"}
 
-        boton_confirmar.click()
-
-        # Esperar pagina de exito
         try:
             wait.until(lambda d: "Exitosa" in d.current_url or "Exitoso" in d.current_url)
         except TimeoutException:
-            log.error("  Timeout esperando pagina de exito.")
             _screenshot(driver, "caucion_post_confirmar")
             return {"ok": False, "estado": "TIMEOUT_PAGINA_EXITOSA",
                     "detalle": f"URL actual: {driver.current_url}"}
 
-    # ── 7. Pagina de EXITO ───────────────────────────────────────
+    # ── 9. Pagina de EXITO ───────────────────────────────────────
     if "Exitosa" in driver.current_url or "Exitoso" in driver.current_url:
         _screenshot(driver, "caucion_exitosa")
         id_op = _parsear_id_operacion(driver)
-        log.info(f"  Caucion colocada exitosamente. ID operacion: {id_op or 'no parseado'}")
-        return {
-            "ok":     True,
-            "estado": "COLOCADA",
-            "detalle": f"URL: {driver.current_url}",
-            "id_op":  id_op,
-        }
+        log.info(f"  Caucion colocada. ID operacion: {id_op or 'no parseado'}")
+        return {"ok": True, "estado": "COLOCADA",
+                "detalle": f"URL: {driver.current_url}", "id_op": id_op}
 
-    # Si llego aca sin exito claro
     _screenshot(driver, "caucion_resultado_desconocido")
-    return {
-        "ok":     False,
-        "estado": "RESULTADO_DESCONOCIDO",
-        "detalle": f"URL final: {driver.current_url}",
-    }
+    return {"ok": False, "estado": "RESULTADO_DESCONOCIDO",
+            "detalle": f"URL final: {driver.current_url}"}
 
 
 # ─────────────────────────────────────────────────────────────────
