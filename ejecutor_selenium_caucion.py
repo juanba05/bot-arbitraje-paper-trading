@@ -224,90 +224,220 @@ def colocar_caucion(driver, monto, plazo, tna_minima=None):
     log.info(f"  Monto ingresado: {int(monto)}")
 
     # ── 4. Seleccionar PLAZO ─────────────────────────────────────
+    # El SELECT usa dias calendario (no habiles). Calculamos cuantos
+    # dias calendario hay hasta el proximo vencimiento habil.
     try:
         select_plazo = Select(driver.find_element(By.ID, "IdPlazo"))
-        select_plazo.select_by_value(str(plazo))
-        log.info(f"  Plazo seleccionado: {plazo}")
+        cal_days = _habiles_a_calendario(plazo)
+        log.info(f"  Plazo {plazo} dias habiles = {cal_days} dias calendario")
+        # Intentar por valor calendario calculado
+        try:
+            select_plazo.select_by_value(str(cal_days))
+            log.info(f"  Plazo seleccionado por valor: {cal_days}")
+        except Exception:
+            # Fallback: primera opcion disponible (plazo mas corto)
+            opts = [o for o in select_plazo.options if o.get_attribute("value")]
+            if opts:
+                opts[min(plazo - 1, len(opts) - 1)].click()
+                log.info(f"  Plazo seleccionado por indice {plazo-1}: {opts[min(plazo-1,len(opts)-1)].text}")
+            else:
+                log.warning(f"  Sin opciones en select de plazo")
     except Exception as e:
         log.warning(f"  No se pudo seleccionar plazo={plazo}: {e}")
 
-    # ── 5. Seleccionar modalidad precio minimo (ingresa TNA) ─────
+    # ── 5. Seleccionar modalidad precio minimo + ingresar TNA ────
+    # Siempre usamos precio minimo con la TNA detectada por el motor.
+    # Esto protege contra ejecucion a tasas peores que la analizada.
+    tna_a_usar = tna_minima if tna_minima is not None else 1.0
     try:
         radio_min = driver.find_element(By.ID, "minimal_price")
         if not radio_min.is_selected():
             radio_min.click()
-            log.info("  Modalidad 'precio minimo' (TNA minima) seleccionada.")
         time.sleep(0.5)  # esperar que aparezca el campo Tna
+        campo_tna = driver.find_element(By.ID, "Tna")
+        campo_tna.clear()
+        campo_tna.send_keys(str(round(tna_a_usar, 2)).replace(".", ","))
+        log.info(f"  Modalidad precio minimo. TNA minima: {tna_a_usar:.2f}%")
     except NoSuchElementException:
-        log.warning("  Radio minimal_price no encontrado — continuando.")
-
-    # ── 6. Ingresar TNA minima ───────────────────────────────────
-    if tna_minima is not None:
-        try:
-            campo_tna = driver.find_element(By.ID, "Tna")
-            campo_tna.clear()
-            campo_tna.send_keys(str(tna_minima).replace(".", ","))
-            log.info(f"  TNA minima ingresada: {tna_minima}")
-        except NoSuchElementException:
-            log.warning("  Campo Tna no encontrado — se omite tna_minima.")
+        log.warning("  Campo TNA no encontrado — continuando sin TNA minima.")
 
     _screenshot(driver, "caucion_form_completo")
 
-    # ── 7. Submit ────────────────────────────────────────────────
+    # ── 7. Submit inicial (muestra preview en la misma pagina) ───
     try:
         boton_submit = driver.find_element(By.ID, "btnEnviar")
     except NoSuchElementException:
-        # Fallback: primer submit del formulario
         try:
             boton_submit = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"], input[type="submit"]')
         except NoSuchElementException:
             _screenshot(driver, "caucion_sin_boton")
             return {"ok": False, "estado": "BOTON_SUBMIT_NO_ENCONTRADO"}
 
-    log.info("  Enviando formulario...")
+    log.info("  Enviando formulario (paso 1 de 2 — preview)...")
     boton_submit.click()
 
-    # ── 8. Pagina de CONFIRMACION ────────────────────────────────
+    # ── 8. Esperar preview inline (id=ConfirmarCaucion aparece) ──
+    # IOL muestra un preview con tasa estimada en la MISMA pagina
+    # antes de navegar. El boton de confirmacion es id='ConfirmarCaucion'.
     try:
-        wait.until(lambda d: "Confirmar" in d.current_url or "Exitosa" in d.current_url)
+        wait.until(EC.element_to_be_clickable((By.ID, "ConfirmarCaucion")))
     except TimeoutException:
         _screenshot(driver, "caucion_post_submit")
-        return {"ok": False, "estado": "TIMEOUT_CONFIRMACION",
+        _guardar_html_diagnostico(driver, "caucion_post_submit")
+        try:
+            body_text = driver.find_element(By.TAG_NAME, "body").text
+            errores = [l for l in body_text.split("\n") if any(
+                w in l.lower() for w in ["error", "invalid", "requer", "oblig", "monto", "plazo"]
+            )]
+            if errores:
+                log.error(f"  Errores encontrados: {errores[:5]}")
+        except Exception:
+            pass
+        return {"ok": False, "estado": "PREVIEW_NO_APARECIO",
                 "detalle": f"URL actual: {driver.current_url}"}
 
-    if "ConfirmarCaucion" in driver.current_url:
-        log.info("  Pagina de confirmacion. Confirmando...")
-        _screenshot(driver, "caucion_confirmar")
+    # Loguear la tasa estimada del preview
+    _screenshot(driver, "caucion_preview")
+    try:
+        body = driver.find_element(By.TAG_NAME, "body").text
+        for linea in body.split("\n"):
+            if "tna" in linea.lower() or "total" in linea.lower() or "monto" in linea.lower():
+                log.info(f"  Preview: {linea.strip()}")
+    except Exception:
+        pass
+
+    # ── 9. Confirmar (paso 2) — abre pantalla con campo contrasena ─
+    log.info("  Click en Confirmar (paso 2 de 3)...")
+    try:
+        btn_conf = driver.find_element(By.ID, "ConfirmarCaucion")
+        btn_conf.click()
+    except NoSuchElementException:
+        _screenshot(driver, "caucion_sin_boton_confirmar")
+        return {"ok": False, "estado": "BOTON_CONFIRMAR_NO_ENCONTRADO"}
+
+    # ── 10. Ingresar contrasena (paso 3) ─────────────────────────
+    # IOL muestra un campo de contrasena como paso final de seguridad.
+    NOMBRES_PASS = ["Password", "password", "Contrasena", "contrasena",
+                    "Pass", "pass", "Clave", "clave", "pin", "Pin"]
+    campo_pass = None
+    for _ in range(15):   # hasta 15 intentos x 1 seg = 15 seg de espera
+        time.sleep(1)
+        for nombre in NOMBRES_PASS:
+            for attr in ["name", "id"]:
+                try:
+                    el = driver.find_element(By.CSS_SELECTOR, f'input[{attr}="{nombre}"]')
+                    if el.is_displayed() and el.get_attribute("type") in ("password", "text"):
+                        campo_pass = el
+                        break
+                except Exception:
+                    pass
+            if campo_pass:
+                break
+        if campo_pass:
+            break
+
+    if not campo_pass:
+        # Intentar con cualquier input type=password visible
         try:
-            btn_conf = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"], input[type="submit"]')
-            btn_conf.click()
+            campos = driver.find_elements(By.CSS_SELECTOR, 'input[type="password"]')
+            for c in campos:
+                if c.is_displayed():
+                    campo_pass = c
+                    break
+        except Exception:
+            pass
+
+    if not campo_pass:
+        _screenshot(driver, "caucion_sin_campo_password")
+        _guardar_html_diagnostico(driver, "caucion_sin_campo_password")
+        return {"ok": False, "estado": "CAMPO_PASSWORD_NO_ENCONTRADO",
+                "detalle": "No se encontro el campo de contrasena en la pantalla de confirmacion"}
+
+    log.info(f"  Campo contrasena encontrado: name='{campo_pass.get_attribute('name')}' id='{campo_pass.get_attribute('id')}'")
+    _screenshot(driver, "caucion_pantalla_password")
+    campo_pass.clear()
+    campo_pass.send_keys(IOL_PASSWORD)
+    log.info("  Contrasena ingresada. Enviando confirmacion final...")
+
+    # ── 11. Submit final (confirmar con contrasena) ───────────────
+    # Guardar HTML para ver los botones disponibles
+    _guardar_html_diagnostico(driver, "caucion_pantalla_password_html")
+    btn_final = None
+    # Candidatos por ID (descubiertos via analysis del HTML)
+    for btn_id in ["btnSubmitCaucionar", "btnAceptar", "btnConfirmar", "Submit"]:
+        try:
+            el = driver.find_element(By.ID, btn_id)
+            if el.is_displayed():
+                btn_final = el
+                log.info(f"  Boton final encontrado: id='{btn_id}'")
+                break
         except NoSuchElementException:
-            _screenshot(driver, "caucion_sin_boton_confirmar")
-            return {"ok": False, "estado": "BOTON_CONFIRMAR_NO_ENCONTRADO"}
-
+            pass
+    # Fallback: cualquier submit visible
+    if not btn_final:
         try:
-            wait.until(lambda d: "Exitosa" in d.current_url or "Exitoso" in d.current_url)
-        except TimeoutException:
-            _screenshot(driver, "caucion_post_confirmar")
-            return {"ok": False, "estado": "TIMEOUT_PAGINA_EXITOSA",
-                    "detalle": f"URL actual: {driver.current_url}"}
+            btn_final = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"], input[type="submit"]')
+        except NoSuchElementException:
+            pass
+    if not btn_final:
+        _screenshot(driver, "caucion_sin_boton_final")
+        return {"ok": False, "estado": "BOTON_FINAL_NO_ENCONTRADO"}
+    btn_final.click()
 
-    # ── 9. Pagina de EXITO ───────────────────────────────────────
-    if "Exitosa" in driver.current_url or "Exitoso" in driver.current_url:
-        _screenshot(driver, "caucion_exitosa")
+    # Esperar resultado
+    try:
+        wait.until(lambda d: d.current_url != f"{BASE_URL}/Operar/Caucionar")
+    except TimeoutException:
+        pass  # puede que el exito sea inline
+
+    time.sleep(2)
+    _screenshot(driver, "caucion_resultado_final")
+    _guardar_html_diagnostico(driver, "caucion_resultado_final")
+
+    # ── 12. Detectar exito ───────────────────────────────────────
+    try:
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+        palabras_exito = ["exitosa", "confirmada", "colocada", "fue enviada",
+                          "orden enviada", "operacion realizada", "n\xfamero de operaci\xf3n",
+                          "nro.", "comprobante"]
+        es_exito = any(p in body_text.lower() for p in palabras_exito)
+    except Exception:
+        es_exito = False
+
+    url_final = driver.current_url
+    if es_exito or "Exitosa" in url_final or "Exitoso" in url_final:
         id_op = _parsear_id_operacion(driver)
-        log.info(f"  Caucion colocada. ID operacion: {id_op or 'no parseado'}")
+        log.info(f"  CAUCION COLOCADA EXITOSAMENTE. ID: {id_op or 'no parseado'}")
         return {"ok": True, "estado": "COLOCADA",
-                "detalle": f"URL: {driver.current_url}", "id_op": id_op}
+                "detalle": f"URL: {url_final}", "id_op": id_op}
 
-    _screenshot(driver, "caucion_resultado_desconocido")
+    # Guardar texto de la pagina para diagnostico
+    try:
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+        log.error(f"  Resultado desconocido. Texto pagina: {body_text[:300]}")
+    except Exception:
+        pass
+
     return {"ok": False, "estado": "RESULTADO_DESCONOCIDO",
-            "detalle": f"URL final: {driver.current_url}"}
+            "detalle": f"URL final: {url_final}"}
 
 
 # ─────────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────────
+
+def _habiles_a_calendario(plazo_habiles):
+    """Convierte dias habiles a dias calendario desde hoy (saltea sabados y domingos)."""
+    from datetime import date, timedelta
+    hoy = date.today()
+    count = 0
+    d = hoy
+    while count < plazo_habiles:
+        d += timedelta(days=1)
+        if d.weekday() < 5:   # lunes=0 ... viernes=4
+            count += 1
+    return (d - hoy).days
+
 
 def _seleccionar_plazo_alternativo(driver, plazo):
     """Intenta seleccionar el plazo via select o radio buttons."""
