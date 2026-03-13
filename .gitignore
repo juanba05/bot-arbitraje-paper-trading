@@ -2,30 +2,25 @@
 # .gitignore — Archivos que NUNCA se suben a GitHub
 # ============================================================
 
-# Credenciales
+# CREDENCIALES — lo mas importante
 .env
 *.env
 secrets.py
 
-# Datos locales / estado runtime
+# Base de datos (datos personales y operaciones)
 datos/
 *.db
 *.sqlite
-*.sqlite3
 
 # Logs
 logs/
 *.log
 
-# Config local sensible
+# Archivos de configuracion del dashboard (pueden tener datos sensibles)
 datos/dashboard_config.json
 datos/bot_activo.json
 datos/alertas_*.json
 datos/ratios_comafi.json
-
-# Archivos de salida local
-*.jsonl
-*.tmp
 
 # Python
 __pycache__/
@@ -54,7 +49,5 @@ Thumbs.db
 Desktop.ini
 $RECYCLE.BIN/
 
-# Documentos/datasets locales
+# Excel de ratios (datos propios)
 ratios_comafi.xlsx
-*.xls
-*.xlsx

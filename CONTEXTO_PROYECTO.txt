@@ -1,0 +1,515 @@
+================================================================
+CONTEXTO_PROYECTO.txt — BOT ARBITRAJE (actualizado 25/02/2026)
+================================================================
+
+PROYECTO: Bot de arbitraje CEDEAR/NYSE con simulador de cauciones
+ESTADO: Paper trading activo. Módulo de cauciones con datos REALES.
+CAPITAL PAPER TRADING: ARS 40.000 (saldo real IOL: ARS 613.37)
+CARPETA: C:\Users\Usuario\bot_arbitraje\
+
+================================================================
+ARCHIVOS CLAVE
+================================================================
+
+config.py           — constantes globales del proyecto
+iol_connector.py    — conexion a API REST de IOL (Bearer token)
+base_datos.py       — funciones de DB SQLite
+motor_cauciones.py  — simulador cauciones CON DATOS REALES (ver abajo)
+motor_calculo.py    — calculo de arbitraje CEDEAR/NYSE
+recolector.py       — recolector de precios
+bot_principal.py    — orquestador principal
+dashboard.py        — dashboard Dash/Plotly
+scraper_iol_cauciones.py   — scraper standalone (para testing)
+buscar_endpoint_cauciones.py — herramienta de diagnostico de API
+explorar_iol_web.py          — herramienta de diagnostico web
+diagnostico_previo.py        — diagnostico pre-mercado completo
+testeo_cauciones.py          — test de validacion de simulacion
+
+================================================================
+BASE DE DATOS: datos/bot_arbitraje.db
+================================================================
+
+Tablas existentes y registros al 25/02/2026:
+  cauciones              83 registros  (historial de tasas anteriores)
+  cauciones_simuladas     0 registros  (se llena con el nuevo motor)
+  seniales               74 registros
+  precios_cedears         0 registros
+  precios_nyse          654 registros
+  ccl_historico         219 registros
+
+================================================================
+MOTOR DE CAUCIONES — ARQUITECTURA DEFINITIVA
+================================================================
+
+FUENTE DE TASAS (resuelto el 25/02/2026):
+  - IOL NO tiene endpoint de tasas en su API pública
+  - Solución: scraping de https://iol.invertironline.com/Mercado/GetCaucionPuntas
+  - Es el mismo endpoint que usa la web de IOL para mostrar tasas
+  - Requiere sesión web (cookies), no Bearer token
+  - Hace login con usuario/password del .env
+  - Sesión cacheada 30 minutos para no sobrecargar IOL
+  - Parámetros POST: moneda="PESOS", plazo=N, idTipoTransaccion=14
+  - Devuelve: tasaCompra (colocadora) y tasaVenta (tomadora)
+
+TASAS REALES OBSERVADAS (25/02/2026, 17:32hs):
+  1 día:  10.00% TNA colocadora | 10.10% tomadora
+  7 días: 20.00% TNA colocadora | 27.90% tomadora
+  14 días: 28.50% TNA colocadora | 29.00% tomadora
+  28 días: 27.20% TNA colocadora | 31.20% tomadora
+  NOTA: plazo 4 días → success=false (no disponible en IOL)
+
+LÓGICA DE ANÁLISIS MULTI-PLAZO:
+  - Evalúa plazos 1, 2 y el óptimo según día de semana
+  - Viernes → plazo óptimo 3 días | Jueves → 2 días | resto → 1 día
+  - Elige el plazo con mayor ganancia neta
+  - Criterio de señal: ganancia_neta > 0 Y (desviación >= umbral O sin historial)
+
+CÁLCULO FINANCIERO CORRECTO:
+  Ganancia bruta  = Capital × (TNA/100) × (plazo/365)
+  Comisión IOL    = Capital × 0.30% × 1.21 (IVA incluido)
+  Ganancia neta   = Ganancia bruta - Comisión
+  
+PROBLEMA CONOCIDO CON SALDO ACTUAL:
+  Con ARS 613.37 disponibles, a 1 día y 10% TNA:
+  Ganancia bruta = 613.37 × 0.10 × 1/365 = ARS 0.17
+  Comisión IOL   = 613.37 × 0.0030 × 1.21 = ARS 2.23 (mínimo aprox)
+  Ganancia neta  = -ARS 2.06 → NO CONVIENE
+  → Se necesita mínimo ~ARS 3.000 para que 1 día sea rentable al 10%
+  → A 7 días con 20% TNA: sí conviene con ese saldo
+
+PROMEDIO HISTÓRICO:
+  - Solo usa registros de los últimos 7 días con fuente=IOL_WEB
+  - Requiere mínimo 3 registros para activarse
+  - Primeros días: sin historial → señal si ganancia_neta > 0
+
+CONSTANTES CLAVE (motor_cauciones.py):
+  TNA_MINIMA = 8.0       (mínimo para considerar la tasa válida)
+  TNA_MAXIMA_VALIDA = 300.0
+  CAPITAL_NORMAL_PCT = 0.70   (70% en horario normal 11-17hs)
+  CAPITAL_CIERRE_PCT = 1.00   (100% en cierre 17-18hs)
+  UMBRAL_CAUCION = 20.0       (en config.py — % sobre promedio para señal)
+  PLAZO_MAX_CAUCION = 3       (en config.py)
+
+PARSEO DE SALDO IOL (corregido):
+  IOL devuelve moneda: "peso_Argentino" (con mayúscula)
+  El parser normaliza a minúsculas antes de comparar
+
+================================================================
+HALLAZGOS IMPORTANTES DE LA SESIÓN
+================================================================
+
+1. API DE IOL — ENDPOINTS QUE RESPONDEN:
+   ✅ /operar/CPD/PuedeOperar → {"operatoriaHabilitada": False} (fuera de horario)
+   ✅ /portafolio/cauciones   → {"pais": "argentina", "activos": []}
+   ✅ /estadocuenta           → saldo real (ver parseo)
+   ✅ /portafolio/argentina   → activos
+   ❌ Todo lo de /operar/caucion/* → HTTP 500
+   ❌ /cauciones/* → HTTP 500 o 404
+
+2. SALDO DE IOL AL 25/02/2026:
+   Cuenta pesos: ARS 613.37 disponibles
+   Títulos valorizados: ~ARS 38.000 (CEDEARs)
+   → La mayor parte del capital está en CEDEARs, no en cash
+
+3. AMBITO.COM: todos los endpoints de tasas → HTTP 404
+   No sirve como fuente. Se descartó definitivamente.
+
+4. WEB DE IOL (iol.invertironline.com):
+   URL correcta: /Operar/Caucionar/ObtenerTasas (NO /Operar/Caucionar)
+   Endpoint de datos: POST /Mercado/GetCaucionPuntas
+   Autenticación: cookies de sesión web (ASP.NET Forms Auth)
+
+================================================================
+CÓMO CORRER EL BOT
+================================================================
+
+# Diagnóstico pre-mercado (cualquier hora):
+python diagnostico_previo.py
+
+# Solo cauciones con datos reales (horario de mercado 10:30-17hs):
+python motor_cauciones.py
+
+# Bot completo:
+python bot_principal.py
+
+# Dashboard:
+python dashboard.py
+# Luego abrir http://127.0.0.1:8050
+
+================================================================
+PRÓXIMOS PASOS SUGERIDOS
+================================================================
+
+1. Conseguir más pesos disponibles para que las cauciones sean rentables
+   (mínimo ARS 5.000 para 1 día al 10% TNA)
+
+2. Agregar visualización de cauciones en dashboard.py:
+   - Tabla de cauciones_simuladas con colores
+   - Gráfico de TNA por plazo en el tiempo
+
+3. Monitoreo automático: bot_principal.py ya llama analizar_cauciones()
+   → verificar que usa el nuevo motor (reemplazar archivo)
+
+4. Considerar agregar plazo 7 días al análisis (mejor TNA = 20%)
+
+5. El UMBRAL_CAUCION=20% en config.py es para cuando haya historial real.
+   Las primeras semanas operará por ganancia_neta > 0 (sin historial).
+
+================================================================
+LIBRERÍAS INSTALADAS (todas OK al 25/02/2026)
+================================================================
+requests 2.32.3 | pandas 2.2.3 | dash 4.0.0 | plotly 5.24.1
+schedule OK | pytz 2024.1 | dotenv OK | sqlite3 OK
+
+================================================================
+BITACORA DE AVANCES - 27/02/2026
+================================================================
+
+[A1] Dashboard con selector de modo forzado del bot (persistente):
+     - Archivo: dashboard.py
+     - Nuevo campo de config: modo_forzado_bot
+     - Opciones: auto | arbitraje | mixto | caucion
+     - Se guarda en datos/dashboard_config.json desde el boton GUARDAR.
+     - Header y panel de mercado ahora muestran si el modo esta forzado.
+
+[A2] Bot principal desacoplado del horario cuando hay modo forzado:
+     - Archivo: bot_principal.py
+     - Lee modo_forzado_bot y, si no es "auto", ejecuta ese modo siempre.
+     - El log del ciclo ahora indica BYMA real + MODO FORZADO aplicado.
+
+[A3] Cauciones priorizadas con datos reales en el loop principal:
+     - Archivo: bot_principal.py
+     - ciclo_cauciones() ahora usa analizar_cauciones(modo="real") en el flujo normal.
+     - Se elimino fallback "auto" para evitar operar con tasa historica en este flujo.
+     - Correccion adicional: toma tasa desde resultado["tna"] (antes buscaba "tasa").
+
+[A4] Ajuste de riesgo operativo en modo caucion forzado:
+     - Archivo: bot_principal.py
+     - Ya no usa 100% del capital todo el dia.
+     - Usa 100% solo en franja de cierre de cauciones; fuera de eso, modo normal.
+
+[A5] Pre-flight operativo profesional (nuevo):
+     - Archivo nuevo: preflight_operativo.py
+     - Chequeos criticos: DB, CCL, token IOL, /estadocuenta, parseo de saldo,
+       muestra de cotizaciones y tasas reales de cauciones (IOL web).
+     - Salida final: READY / NOT_READY.
+     - Guarda reporte JSON en datos/preflight_last.json + historico timestamped.
+     - No imprime credenciales ni secretos.
+
+[A6] Lanzador de sesion simplificado (nuevo):
+     - Archivo nuevo: lanzar_sesion.py
+     - Start:
+         python lanzar_sesion.py start --mode both
+       (levanta bot_principal + dashboard en ventanas separadas)
+     - Status:
+         python lanzar_sesion.py status
+     - Stop:
+         python lanzar_sesion.py stop
+     - Guarda PIDs en datos/sesion_procesos.json.
+
+[A7] Guia operativa diaria (nuevo):
+     - Archivo nuevo: OPERATIVA_DIARIA.md
+     - Incluye paso a paso pre-market, inicio/parada de sesion,
+       controles manuales y buenas practicas para trabajar con Codex
+       mientras el bot esta corriendo.
+
+[A8] Dashboard UX + filtros temporales:
+     - Archivo: dashboard.py
+     - Selector de modo del bot movido a la tarjeta superior (junto a ON/OFF).
+     - Persistencia inmediata del modo forzado al cambiar dropdown.
+     - Nuevo selector global de ventana temporal en la columna derecha:
+       HOY (default) | 7 DIAS | 30 DIAS | GLOBAL.
+     - Se aplico filtrado temporal a las vistas:
+       EN VIVO, CAUCIONES, OPERACIONES y SEÑALES.
+     - Mejora visual: tarjetas con borde redondeado y sombra suave.
+
+[A9] Lanzador sin ventanas vacias + logs de sesion:
+     - Archivo: lanzar_sesion.py
+     - En Windows ahora inicia procesos en background (detached).
+     - Ya no abre dos consolas extra vacias.
+     - Logs de sesion:
+         logs/sesion_bot.log
+         logs/sesion_dashboard.log
+
+[A10] Paper trading con saldo real de IOL:
+     - Archivo: ejecutor_paper.py
+     - capital_disponible() ahora usa saldo ARS real de /estadocuenta.
+     - Agregado cache corto (60s) para no sobrecargar API.
+     - Si IOL no responde, fallback seguro a ARS 40.000.
+     - Nueva funcion: capital_base_actual() con fuente (IOL_REAL o FALLBACK_40000).
+
+[A11] Dashboard alineado con capital real:
+     - Archivo: dashboard.py
+     - La tarjeta de capital usa el mismo origen que ejecutor_paper.py.
+     - Muestra Capital Base + fuente para trazabilidad operativa.
+     - Evita desfasajes entre ejecucion paper y visualizacion.
+
+[A12] Modo estricto: nunca operar con fallback:
+     - Archivo: ejecutor_paper.py
+     - Nuevo control EXIGIR_SALDO_IOL_REAL = True.
+     - ejecutar_caucion_paper() y ejecutar_arbitraje_paper() se bloquean
+       si la fuente de capital no es IOL_REAL.
+     - Si IOL falla, el sistema no ejecuta operaciones paper.
+
+[A13] Señal visual de bloqueo por capital fallback:
+     - Archivo: dashboard.py
+     - Tarjeta de capital ahora muestra mensaje rojo si fuente != IOL_REAL.
+     - Muestra mensaje verde cuando la fuente valida es IOL_REAL.
+
+================================================================
+ROADMAP OPERATIVO - PREPARACION A PRODUCCION REAL
+================================================================
+
+OBJETIVO GENERAL:
+Pasar de paper trading a ejecucion real con datos de mercado reales y validaciones
+de seguridad completas, con foco principal en cauciones.
+
+FASE 0 - BASELINE TECNICO (checklist)
+[ ] Verificar que bot arranca sin errores y mantiene ciclos estables >= 2 horas.
+[ ] Verificar que dashboard refleja modo, estado y metricas sin desfasajes.
+[ ] Confirmar integridad de DB (sin tablas faltantes, sin escrituras fallidas).
+
+FASE 1 - CONECTIVIDAD API IOL (critico)
+[ ] /token login OK y renovacion de token OK por > 30 min.
+[ ] /estadocuenta parsea saldo ARS correctamente (incluyendo "peso_Argentino").
+[ ] Cotizaciones BYMA (CEDEAR) responden para muestra de tickers clave.
+[ ] Cotizaciones NYSE/NASDAQ responden para muestra de tickers clave.
+[ ] Monitoreo de errores HTTP (500/404/timeout) con logging claro.
+
+FASE 2 - CAUCIONES REALES (funcion principal)
+[ ] Login web IOL + sesion de cookies estable (cache 30 min).
+[ ] Endpoint /Mercado/GetCaucionPuntas responde para plazos 1,2,3.
+[ ] Rechazo explicito cuando no hay tasa real (sin fallback para operar).
+[ ] Validar formula neta completa: bruta - comision - IVA.
+[ ] Validar decision de senal con historial real (min 3 muestras/7 dias).
+[ ] Confirmar guardado consistente en cauciones y cauciones_simuladas.
+
+FASE 3 - GOBERNANZA DE RIESGO
+[ ] Definir monto maximo real por operacion y por dia.
+[ ] Definir regla de corte: X operaciones negativas consecutivas.
+[ ] Definir circuit breaker por fallas de API o datos anomalos.
+[ ] Definir condiciones exactas para habilitar ejecucion real.
+
+FASE 4 - DRY-RUN CONTROLADO (sin dinero real)
+[ ] Ejecutar 5 ruedas completas en paper solo con datos reales.
+[ ] Comparar senales vs rentabilidad neta esperada.
+[ ] Revisar logs de punta a punta cada cierre.
+[ ] Cerrar pendientes de dashboard para seguimiento de cauciones.
+
+FASE 5 - GO-LIVE ESCALONADO
+[ ] Dia 1-3: monto minimo real, una sola estrategia (caucion).
+[ ] Dia 4-10: aumentar monto gradualmente si no hay desvio.
+[ ] Habilitar arbitraje real solo tras estabilidad comprobada de cauciones.
+
+OBSERVACIONES ABIERTAS (a validar en siguientes sesiones)
+- El modulo motor_cauciones.py actualmente contiene lectura directa de .env
+  para login web. Mantener control estricto de secretos y evitar impresiones.
+- En historial reciente hubo ciclos sin senal con fuente DB_HISTORICO; con el
+  ajuste de hoy el flujo principal queda orientado a tasa real.
+
+================================================================
+PENDIENTES PROXIMA SESION (SABADO 28/02/2026)
+================================================================
+
+1) Limpieza de historico de tasas de caucion (recomendado)
+   - Objetivo: evitar mezcla de tasas no reales en analisis/reportes.
+   - Accion propuesta: conservar en tabla `cauciones` solo filas con fuente=IOL_WEB
+     (o marcarlas explicitamente como no operativas antes de filtrar en dashboard).
+   - Seguridad: hacer backup previo de DB antes de cualquier limpieza.
+
+2) Verificacion post-cambios (cierre operativo)
+   - Ejecutar preflight_operativo.py y confirmar READY.
+   - Correr bot_principal.py 2-3 ciclos y validar:
+     a) sin after-hours en bot/dashboard
+     b) cauciones sin fallback/simulacion de tasa
+     c) bloqueo correcto si IOL no entrega tasa real.
+
+3) Ajuste visual pendiente en dashboard
+   - Revisar contraste de textos secundarios en tarjetas/tablas durante uso real.
+   - Ajustar solo estilos (sin cambiar paleta base).
+
+================================================================
+FIN DEL CONTEXTO
+================================================================
+
+[A14] Bridge remoto por WhatsApp (nuevo, modo seguro y reversible):
+     - Archivo nuevo: whatsapp_bridge.py
+     - Webhook local stdlib: POST /whatsapp, healthcheck GET /health.
+     - Seguridad: allowlist por numero (`WSP_ALLOWED_FROM`) y PIN opcional
+       (`WSP_REQUIRE_PIN=true`, `WSP_PIN=...`).
+     - Auditoria local append-only: datos/wsp_inbox.jsonl + estado en datos/wsp_state.json.
+     - Utilidades CLI:
+         python whatsapp_bridge.py serve --port 8787
+         python whatsapp_bridge.py pending --limit 20
+         python whatsapp_bridge.py status
+         python whatsapp_bridge.py send --to +549... --text "..."
+     - Restriccion conocida: este bridge no inyecta mensajes en este chat de Codex;
+       sirve como canal remoto de entrada/salida operativo para la notebook.
+
+[A15] Automatizacion remota por WhatsApp (agent):
+     - Archivo: whatsapp_bridge.py
+     - Nuevo comando:
+         python whatsapp_bridge.py agent --interval 5 --max 50
+       Hace poll continuo + procesa comandos permitidos + responde por WhatsApp.
+     - Comandos remotos habilitados (lista blanca):
+         help | ping | estado/status | start | start bot | start dashboard | detener | preflight | detener bridge
+     - Nota sandbox Twilio:
+         evitar comando "stop" por WhatsApp (Twilio lo usa para desconectar sandbox).
+     - Seguridad:
+         mantiene filtro por numero permitido + PIN.
+         no ejecuta shell arbitrario.
+     - Objetivo operativo:
+         inicio/cierre y chequeos basicos desde remoto sin exponer puertos locales.
+
+[A16] Modo Codex remoto via WhatsApp (opcion 2):
+     - Archivo: whatsapp_bridge.py
+     - Nuevo comando remoto:
+         1234 codex status
+         1234 codex <pedido>
+     - Implementacion:
+         ejecuta `codex exec --full-auto` en este repo y devuelve resumen corto por WhatsApp.
+     - Seguridad operativa:
+         mantiene filtro numero + PIN, sin shell libre directo por WhatsApp.
+     - Uso recomendado:
+         pedidos concretos y pequenos por mensaje; luego validar con `1234 status` o `1234 preflight`.
+
+[A17] Cauciones - mejoras de simulacion y decision (28/02/2026):
+     - Archivo: motor_cauciones.py
+     - Capital minimo requerido por operacion:
+         calcula `capital_minimo_requerido` y `capital_faltante` por plazo.
+         si no alcanza capital, el motivo de no senal lo informa explicitamente.
+     - Media operativa para inyeccion de capital:
+         calcula `media_capital_minimo_7d` para guiar cuanto capital conviene inyectar.
+     - Costo de oportunidad (esperar spike vs carry):
+         agrega `ev_esperar_diario` y `ev_carry_diario` con decision sugerida.
+     - Aprendizaje sim-vs-real (sin operar real todavia):
+         tabla nueva `cauciones_real_vs_sim` + helper
+         `registrar_operacion_real_caucion(...)` para calibrar comision al pasar a real.
+     - Simulacion ahora usa comision:
+         `SIMULADA_DEFAULT` (comision historica del modelo) o
+         `REAL_APRENDIDA_xM` si hay muestras reales suficientes.
+
+[A18] Cauciones - cascada de cierre y regla extraordinaria (28/02/2026):
+     - Archivo: motor_cauciones.py
+     - Cascada fin de rueda (1/2/3 dias):
+         si en cierre no hubo disparo claro, aplica fallback operativo y elige
+         el plazo con mejor ganancia neta positiva; en empate, el plazo mas corto.
+     - Regla de 7 dias:
+         7d queda deshabilitado por defecto y solo se considera si hay salto
+         extraordinario de tasa vs curva 1-3d (`SALTO_EXTRA_7D_PTS` o `SALTO_EXTRA_7D_PCT`).
+     - Trazabilidad:
+         el resultado devuelve flags de auditoria:
+         `cascade_cierre_aplicada`, `fin_rueda_caucion`, `disparo_1_3`,
+         `tna_7d`, `usa_7d_extraordinaria`.
+     - Validacion tecnica:
+         `python -m py_compile motor_cauciones.py` OK.
+
+[A19] Seguridad + ejecucion real caucion + dashboard (03/03/2026):
+     - Seguridad de credenciales:
+         - motor_cauciones.py y scraper_iol_cauciones.py ya NO leen .env manualmente.
+         - ambos usan credenciales desde config.py (dotenv en runtime).
+         - diagnostico_previo.py oculta payloads de API en mensajes para evitar exponer datos sensibles.
+     - Dashboard:
+         - Corregido bug en SIM caucion:
+           "GANANCIA NETA EST." ahora suma solo simulaciones con `tiene_senal=1`.
+         - Texto normalizado para evitar mojibake en UI.
+         - Nuevos controles de ejecucion:
+           `execution_mode` (paper/real) y `REAL CAUCION OFF/ON`.
+     - Motor real de cauciones:
+         - Archivo nuevo: ejecutor_real_caucion.py
+         - Agrega guardas de seguridad:
+           `real_caucion_enabled` (kill switch),
+           canario por monto,
+           limite maximo por orden,
+           idempotencia por `ciclo_id` (evita orden duplicada en el mismo ciclo).
+         - Agrega auditoria completa:
+           tablas `cauciones_ordenes_real` y `cauciones_fills_real`,
+           y comparacion con `cauciones_real_vs_sim`.
+     - Integracion bot_principal:
+         - `execution_mode=real` solo se permite en modo `caucion`.
+         - Si el modo no es caucion, bloquea operativa real por seguridad.
+         - En modo caucion + real, usa `ejecutor_real_caucion`.
+     - Estado de endpoints IOL:
+         - `api/v2/operar/caucion/*` sigue devolviendo HTTP 500 en pruebas.
+         - endpoint web de tasas `POST /Mercado/GetCaucionPuntas` responde OK.
+         - pendiente critico: confirmar endpoint real de colocacion/fill desde Network del navegador.
+     - Siguiente paso operativo (prioridad alta):
+         1) Confirmar endpoint real de colocacion en IOL web.
+         2) Configurar endpoint de estado/fill (si aplica).
+         3) Ejecutar 1 orden canario real y validar:
+            - insercion en `cauciones_ordenes_real`
+            - insercion en `cauciones_fills_real` (o estado enviado)
+            - comparacion en `cauciones_real_vs_sim`.
+
+================================================================
+HOTFIX OPERATIVO - 09/03/2026 (CIERRE)
+================================================================
+
+[H1] Horario operativo ajustado:
+     - mercado.py: cierre de cauciones actualizado a 17:00hs.
+     - bot_principal.py: corte diario de trabajo a 17:15hs (estado fin_jornada_diaria).
+     - Objetivo: evitar intentos fuera de ventana y cerrar jornada de forma consistente.
+
+[H2] Flujo API real migrado a endpoint documentado:
+     - Fuente: Swagger v2 de IOL descargado localmente en datos/docs_iol/v2_swagger.json.
+     - Colocacion real: POST /api/v2/operar/CPD (no /operar/Caucion/Colocar).
+     - Modelo CPD: idSubasta + tasa + fuente.
+     - Agregado paso de token operatoria: POST /api/v2/operar/Token con header Device.
+
+[H3] Estado de ejecucion real validado en pruebas:
+     - Se pudo generar token operatoria via /operar/Token (con Device).
+     - Gate de broker sigue devolviendo operatoriaHabilitada=false en /operar/CPD/PuedeOperar.
+     - En intentos de cierre (17:59-18:03) no se ejecuto canario por bloqueo de broker.
+
+[H4] Dashboard mejorado:
+     - Tab EN VIVO: grafico de tasas de caucion 1/2/3/7 dias en un mismo chart.
+       Incluye offset visual para evitar lineas amontonadas y hover con TNA real.
+     - Tab SENALES: cauciones diferenciadas por plazo (1d/2d/3d/7d) con colores.
+       Tabla de senales ahora incluye columna de plazo.
+
+================================================================
+CORRECCION CRITICA - 12/03/2026
+================================================================
+
+[C1] CPD descartado como ruta de cauciones:
+     - Se confirmo por soporte y por HAR real que CPD/CHPD corresponde a
+       cheques de pago diferido, no a cauciones.
+     - La operativa real de caucion en IOL quedo confirmada como flujo web:
+       /Operar/Caucionar -> /Operar/ConfirmarCaucion -> /Operar/CaucionExitosa
+     - Consecuencia:
+       toda la logica que intentaba /api/v2/operar/CPD para cauciones fue
+       invalidada como supuesto tecnico.
+
+[C2] Estado actual despues de la correccion:
+     - Analisis de cauciones reales: OK (IOL web /Mercado/GetCaucionPuntas)
+     - Ejecucion paper: OK
+     - Ejecucion real automatica: PENDIENTE
+       Falta implementar automatizacion de navegador sobre el flujo web real.
+
+[C3] Regla operativa vigente:
+     - Nunca volver a interpretar CPD/CHPD como caucion.
+     - Si el dashboard queda en execution_mode=real, el preflight debe marcar
+       NOT_READY hasta que exista automatizacion web lista.
+
+PENDIENTES CRITICOS (ordenados por impacto)
+1) Habilitacion broker para operativa API CPD:
+   - Confirmar con IOL que la cuenta tenga operatoria CPD habilitada por API.
+   - Condicion de avance: /operar/CPD/PuedeOperar => operatoriaHabilitada=true.
+
+2) Confirmar subastas activas vigentes al momento operativo:
+   - Validar que /operar/CPD/activa/todos entregue idSubasta vigente.
+   - Si devuelve cache vieja/no activa, escalar con soporte IOL (issue de backend de subastas).
+
+3) Prueba canario de punta a punta (objetivo critico):
+   - Monto 20.001 ARS, plazo 1 dia, execution_mode=real, real_caucion_enabled=true.
+   - Resultado esperado: respuesta con idTransaccion (estado ENVIADA/FILLED segun polling).
+
+4) Confirmacion de flujo autonomo del bot:
+   - Dejar modo forzado caucion + deteccion normal de senales.
+   - Verificar que, ante senal valida, ejecute solo sin intervencion manual.
+
+PENDIENTES NO CRITICOS
+1) Refinar visuales de dashboard (densidad y leyendas).
+2) Mejorar diagnosticos de causas no ejecutadas en tab SENALES.
+3) Limpiar textos/encoding historicos del contexto para legibilidad.
+
