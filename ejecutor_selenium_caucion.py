@@ -32,11 +32,17 @@ os.makedirs(RUTA_SCREENSHOTS, exist_ok=True)
 # DRIVER
 # ─────────────────────────────────────────────────────────────────
 
-def crear_driver(headless=False):
+def _js_click(driver, element):
+    """Hace click via JavaScript — funciona aunque Chrome este minimizado."""
+    driver.execute_script("arguments[0].click()", element)
+
+
+def crear_driver(headless=False, minimized=True):
     """
     Crea y devuelve un Chrome driver con anti-deteccion.
-    headless=False: Chrome visible (recomendado para la primera prueba).
-    headless=True:  Chrome en segundo plano (para produccion).
+    headless=False + minimized=True: Chrome arranca minimizado en la barra de
+        Windows (no interrumpe el trabajo, pero es visible en la barra inferior).
+    headless=True: Chrome completamente invisible (sin icono en barra).
     """
     options = uc.ChromeOptions()
     options.add_argument("--no-sandbox")
@@ -46,6 +52,11 @@ def crear_driver(headless=False):
         options.add_argument("--headless=new")
     driver = uc.Chrome(options=options, version_main=145)
     driver.implicitly_wait(5)
+    if not headless and minimized:
+        try:
+            driver.minimize_window()
+        except Exception:
+            pass
     return driver
 
 
@@ -101,7 +112,7 @@ def login(driver, usuario=None, password=None):
         btn = driver.find_element(
             By.CSS_SELECTOR, 'button[type="submit"], input[type="submit"]'
         )
-        btn.click()
+        _js_click(driver, btn)
     except NoSuchElementException:
         log.error("  No se encontro el boton de login.")
         _screenshot(driver, "login_no_button")
@@ -187,14 +198,34 @@ def colocar_caucion(driver, monto, plazo, tna_minima=None):
     wait = WebDriverWait(driver, TIMEOUT)
 
     # ── 1. Navegar al formulario ─────────────────────────────────
+    # Primero vamos a la pagina principal para "calentar" la sesion,
+    # luego navegamos al formulario. Esto evita que IOL redirija al
+    # detectar una navegacion directa desde login al formulario de trading.
+    log.info("  Esperando que la sesion se estabilice...")
+    time.sleep(3)
+    log.info("  Navegando a pagina principal primero...")
+    driver.get(f"{BASE_URL}/micuenta/estadocuenta")
+    time.sleep(2)
+
+    url_home = driver.current_url
+    if "Login" in url_home:
+        _screenshot(driver, "caucion_redir_login")
+        return {"ok": False, "estado": "SESION_EXPIRADA",
+                "detalle": "Redireccion a login al cargar estadocuenta"}
+
+    log.info(f"  Sesion activa en: {url_home}")
     log.info("  Navegando a /Operar/Caucionar...")
     driver.get(f"{BASE_URL}/Operar/Caucionar")
+
     try:
         wait.until(lambda d: "Login" not in d.current_url)
     except TimeoutException:
         _screenshot(driver, "caucion_redir_login")
         return {"ok": False, "estado": "SESION_EXPIRADA",
                 "detalle": "Redireccion a login al abrir Caucionar"}
+
+    url_form = driver.current_url
+    log.info(f"  URL despues de navegar a Caucionar: {url_form}")
 
     # Esperar que el campo monto este presente en el DOM
     try:
@@ -203,7 +234,7 @@ def colocar_caucion(driver, monto, plazo, tna_minima=None):
         _screenshot(driver, "caucion_form_no_cargo")
         _guardar_html_diagnostico(driver, "caucion_form_no_cargo")
         return {"ok": False, "estado": "FORMULARIO_NO_CARGADO",
-                "detalle": "Campo #textmonto no aparecio en el DOM"}
+                "detalle": f"Campo #textmonto no aparecio. URL actual: {driver.current_url}"}
 
     time.sleep(1)
     _screenshot(driver, "caucion_form_cargado")
@@ -212,7 +243,7 @@ def colocar_caucion(driver, monto, plazo, tna_minima=None):
     try:
         radio_ars = driver.find_element(By.ID, "moneda-ars")
         if not radio_ars.is_selected():
-            radio_ars.click()
+            _js_click(driver, radio_ars)
             log.info("  Moneda ARS seleccionada.")
     except NoSuchElementException:
         log.warning("  Radio moneda-ars no encontrado — continuando.")
@@ -238,7 +269,7 @@ def colocar_caucion(driver, monto, plazo, tna_minima=None):
             # Fallback: primera opcion disponible (plazo mas corto)
             opts = [o for o in select_plazo.options if o.get_attribute("value")]
             if opts:
-                opts[min(plazo - 1, len(opts) - 1)].click()
+                _js_click(driver, opts[min(plazo - 1, len(opts) - 1)])
                 log.info(f"  Plazo seleccionado por indice {plazo-1}: {opts[min(plazo-1,len(opts)-1)].text}")
             else:
                 log.warning(f"  Sin opciones en select de plazo")
@@ -252,7 +283,7 @@ def colocar_caucion(driver, monto, plazo, tna_minima=None):
     try:
         radio_min = driver.find_element(By.ID, "minimal_price")
         if not radio_min.is_selected():
-            radio_min.click()
+            _js_click(driver, radio_min)
         time.sleep(0.5)  # esperar que aparezca el campo Tna
         campo_tna = driver.find_element(By.ID, "Tna")
         campo_tna.clear()
@@ -274,13 +305,13 @@ def colocar_caucion(driver, monto, plazo, tna_minima=None):
             return {"ok": False, "estado": "BOTON_SUBMIT_NO_ENCONTRADO"}
 
     log.info("  Enviando formulario (paso 1 de 2 — preview)...")
-    boton_submit.click()
+    _js_click(driver, boton_submit)
 
     # ── 8. Esperar preview inline (id=ConfirmarCaucion aparece) ──
     # IOL muestra un preview con tasa estimada en la MISMA pagina
     # antes de navegar. El boton de confirmacion es id='ConfirmarCaucion'.
     try:
-        wait.until(EC.element_to_be_clickable((By.ID, "ConfirmarCaucion")))
+        wait.until(EC.presence_of_element_located((By.ID, "ConfirmarCaucion")))
     except TimeoutException:
         _screenshot(driver, "caucion_post_submit")
         _guardar_html_diagnostico(driver, "caucion_post_submit")
@@ -310,7 +341,7 @@ def colocar_caucion(driver, monto, plazo, tna_minima=None):
     log.info("  Click en Confirmar (paso 2 de 3)...")
     try:
         btn_conf = driver.find_element(By.ID, "ConfirmarCaucion")
-        btn_conf.click()
+        _js_click(driver, btn_conf)
     except NoSuchElementException:
         _screenshot(driver, "caucion_sin_boton_confirmar")
         return {"ok": False, "estado": "BOTON_CONFIRMAR_NO_ENCONTRADO"}
@@ -326,7 +357,8 @@ def colocar_caucion(driver, monto, plazo, tna_minima=None):
             for attr in ["name", "id"]:
                 try:
                     el = driver.find_element(By.CSS_SELECTOR, f'input[{attr}="{nombre}"]')
-                    if el.is_displayed() and el.get_attribute("type") in ("password", "text"):
+                    # No chequeamos is_displayed() porque la ventana puede estar minimizada
+                    if el.get_attribute("type") in ("password", "text"):
                         campo_pass = el
                         break
                 except Exception:
@@ -337,13 +369,11 @@ def colocar_caucion(driver, monto, plazo, tna_minima=None):
             break
 
     if not campo_pass:
-        # Intentar con cualquier input type=password visible
+        # Intentar con cualquier input type=password (sin requerir visibilidad)
         try:
             campos = driver.find_elements(By.CSS_SELECTOR, 'input[type="password"]')
-            for c in campos:
-                if c.is_displayed():
-                    campo_pass = c
-                    break
+            if campos:
+                campo_pass = campos[0]
         except Exception:
             pass
 
@@ -363,17 +393,17 @@ def colocar_caucion(driver, monto, plazo, tna_minima=None):
     # Guardar HTML para ver los botones disponibles
     _guardar_html_diagnostico(driver, "caucion_pantalla_password_html")
     btn_final = None
-    # Candidatos por ID (descubiertos via analysis del HTML)
-    for btn_id in ["btnSubmitCaucionar", "btnAceptar", "btnConfirmar", "Submit"]:
+    # Candidatos por ID (confirmados via HTML discovery 13/03/2026).
+    # No chequeamos is_displayed() — la ventana puede estar minimizada.
+    for btn_id in ["btnSubmitCaucionar", "btnAceptar", "btnConfirmar", "submit", "Submit"]:
         try:
             el = driver.find_element(By.ID, btn_id)
-            if el.is_displayed():
-                btn_final = el
-                log.info(f"  Boton final encontrado: id='{btn_id}'")
-                break
+            btn_final = el
+            log.info(f"  Boton final encontrado: id='{btn_id}'")
+            break
         except NoSuchElementException:
             pass
-    # Fallback: cualquier submit visible
+    # Fallback: cualquier submit del DOM (no requiere visibilidad)
     if not btn_final:
         try:
             btn_final = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"], input[type="submit"]')
@@ -382,7 +412,7 @@ def colocar_caucion(driver, monto, plazo, tna_minima=None):
     if not btn_final:
         _screenshot(driver, "caucion_sin_boton_final")
         return {"ok": False, "estado": "BOTON_FINAL_NO_ENCONTRADO"}
-    btn_final.click()
+    _js_click(driver, btn_final)
 
     # Esperar resultado
     try:
@@ -395,11 +425,17 @@ def colocar_caucion(driver, monto, plazo, tna_minima=None):
     _guardar_html_diagnostico(driver, "caucion_resultado_final")
 
     # ── 12. Detectar exito ───────────────────────────────────────
+    # La pagina de exito puede ser /Operar/CaucionExitosa O el listado
+    # de "Estado de Cauciones" con la orden en estado "Iniciada".
     try:
         body_text = driver.find_element(By.TAG_NAME, "body").text
-        palabras_exito = ["exitosa", "confirmada", "colocada", "fue enviada",
-                          "orden enviada", "operacion realizada", "n\xfamero de operaci\xf3n",
-                          "nro.", "comprobante"]
+        palabras_exito = [
+            "exitosa", "confirmada", "colocada", "fue enviada",
+            "orden enviada", "operacion realizada",
+            "n\xfamero de operaci\xf3n", "nro.", "comprobante",
+            # pagina de estado de cauciones post-ejecucion (confirmado 13/03/2026):
+            "iniciada", "cauciones pendientes", "caucion en pesos",
+        ]
         es_exito = any(p in body_text.lower() for p in palabras_exito)
     except Exception:
         es_exito = False
@@ -474,8 +510,11 @@ def _parsear_id_operacion(driver):
     try:
         texto = driver.find_element(By.TAG_NAME, "body").text
         import re
-        # Buscar patrones como: N° 12345678 o id: 12345678 o numero: 12345678
         patrones = [
+            # Formato tabla Estado de Cauciones (confirmado 13/03/2026):
+            # "167032333 Iniciada Caución en Pesos ..."
+            r"(\d{7,12})\s+(?:Iniciada|Pendiente|Confirmada|Colocada)",
+            # Formatos clasicos
             r"[Nn][°ú]\s*(\d{5,12})",
             r"[Nn]umero[:\s]+(\d{5,12})",
             r"[Ii][dD][:\s]+(\d{5,12})",
@@ -523,7 +562,7 @@ def ejecutar_caucion_selenium(monto, plazo, tna_minima=None, headless=False):
         if tna_minima:
             log.info(f"  TNA min: {tna_minima:.2f}%")
 
-        driver = crear_driver(headless=headless)
+        driver = crear_driver(headless=headless, minimized=not headless)
 
         # Login
         ok_login = login(driver)

@@ -255,49 +255,60 @@ def _obtener_tasa_iol_web(plazo_dias=1, moneda="PESOS"):
     Obtiene la tasa colocadora real desde /Mercado/GetCaucionPuntas de IOL.
     Este es el mismo endpoint que usa la pagina web de cauciones de IOL.
     Devuelve float TNA colocadora o None si falla.
+    Reintenta hasta 3 veces con 5 segundos de espera para tolerar
+    cortes breves de red (pantalla bloqueada, Windows throttling, etc.).
     """
-    try:
-        session = _crear_sesion_web_iol()
-        if session is None:
+    import time as _time
+    MAX_INTENTOS = 3
+    ESPERA_ENTRE_INTENTOS = 5  # segundos
+
+    for intento in range(1, MAX_INTENTOS + 1):
+        try:
+            session = _crear_sesion_web_iol()
+            if session is None:
+                break  # falla de autenticacion, no tiene sentido reintentar
+
+            resp = session.post(
+                "https://iol.invertironline.com/Mercado/GetCaucionPuntas",
+                data={"moneda": moneda, "plazo": str(plazo_dias), "idTipoTransaccion": "14"},
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Referer": "https://iol.invertironline.com/Operar/Caucionar/ObtenerTasas",
+                },
+                timeout=15  # aumentado de 10 a 15s para toleraar red lenta
+            )
+
+            if resp.status_code != 200:
+                raise ValueError(f"HTTP {resp.status_code}")
+
+            datos = resp.json()
+            if not datos.get("success"):
+                return None  # respuesta valida pero sin datos (mercado cerrado, etc.)
+
+            puntas = datos.get("listaPuntas", [])
+            if not puntas:
+                return None
+
+            # tasaCompra = tasa colocadora (quien coloca pesos)
+            # tasaVenta  = tasa tomadora  (quien toma pesos prestados)
+            primera = puntas[0]
+            tasa_raw = primera.get("tasaCompra") or primera.get("precioCompra")
+            if tasa_raw is None:
+                return None
+
+            tna = float(str(tasa_raw).replace(",", ".").replace("%", "").strip())
+            if 0 < tna < TNA_MAXIMA_VALIDA:
+                return tna
             return None
 
-        resp = session.post(
-            "https://iol.invertironline.com/Mercado/GetCaucionPuntas",
-            data={"moneda": moneda, "plazo": str(plazo_dias), "idTipoTransaccion": "14"},
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "X-Requested-With": "XMLHttpRequest",
-                "Referer": "https://iol.invertironline.com/Operar/Caucionar/ObtenerTasas",
-            },
-            timeout=10
-        )
-
-        if resp.status_code != 200:
-            return None
-
-        datos = resp.json()
-        if not datos.get("success"):
-            return None
-
-        puntas = datos.get("listaPuntas", [])
-        if not puntas:
-            return None
-
-        # tasaCompra = tasa colocadora (quien coloca pesos)
-        # tasaVenta  = tasa tomadora  (quien toma pesos prestados)
-        primera = puntas[0]
-        tasa_raw = primera.get("tasaCompra") or primera.get("precioCompra")
-        if tasa_raw is None:
-            return None
-
-        tna = float(str(tasa_raw).replace(",", ".").replace("%", "").strip())
-        if 0 < tna < TNA_MAXIMA_VALIDA:
-            return tna
-        return None
-
-    except Exception as e:
-        print(f"[CAUCIONES] ⚠️  IOL web scraper error: {e}")
-        return None
+        except Exception as e:
+            if intento < MAX_INTENTOS:
+                print(f"[CAUCIONES] ⚠️  IOL web scraper error (intento {intento}/{MAX_INTENTOS}): {e} — reintentando en {ESPERA_ENTRE_INTENTOS}s...")
+                _time.sleep(ESPERA_ENTRE_INTENTOS)
+            else:
+                print(f"[CAUCIONES] ⚠️  IOL web scraper error (intento {intento}/{MAX_INTENTOS}): {e} — sin mas intentos.")
+    return None
 
 
 def _obtener_tasa_db(plazo_dias=1):
@@ -1008,7 +1019,7 @@ def guardar_senal_db(tna, promedio, desviacion_pct, capital, ganancia_neta, plaz
         return False
 
 
-def guardar_tasa_historica(tna, fuente):
+def guardar_tasa_historica(tna, fuente, plazo_dias=1):
     """Guarda la tasa en la tabla cauciones (historial)."""
     try:
         conn = sqlite3.connect(RUTA_DB)
@@ -1016,7 +1027,7 @@ def guardar_tasa_historica(tna, fuente):
         cur.execute("""
             INSERT INTO cauciones (fecha_hora, plazo_dias, tasa_anual, fuente)
             VALUES (?, ?, ?, ?)
-        """, (datetime.now().isoformat(), 1, tna, fuente))
+        """, (datetime.now().isoformat(), int(plazo_dias), tna, fuente))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -1092,6 +1103,9 @@ def analizar_cauciones(modo="auto"):
         fuente_tna = "IOL_WEB"
         if tna < TNA_MINIMA or tna > TNA_MAXIMA_VALIDA:
             continue
+
+        # Guardar tasa historica para este plazo (asi aparece en el dashboard)
+        guardar_tasa_historica(tna, fuente_tna, plazo_dias=plazo)
 
         venc = ahora.date()
         dias_sumados = 0
@@ -1172,6 +1186,9 @@ def analizar_cauciones(modo="auto"):
     if resultados_por_plazo:
         max_tna_1_3 = max(r["tna"] for r in resultados_por_plazo.values())
     tna_7d = _obtener_tasa_iol_web(plazo_dias=7)
+    # Guardar tasa 7d en historial siempre que sea valida (para el dashboard)
+    if tna_7d is not None and TNA_MINIMA < tna_7d < TNA_MAXIMA_VALIDA:
+        guardar_tasa_historica(tna_7d, "IOL_WEB", plazo_dias=7)
     usar_7d = _es_salto_extraordinario_7d(max_tna_1_3, tna_7d)
     if usar_7d and tna_7d is not None and 0 < tna_7d < TNA_MAXIMA_VALIDA:
         venc_7d = ahora.date()
@@ -1370,8 +1387,7 @@ def analizar_cauciones(modo="auto"):
         "origen_comision": origen_comision,
     }
     guardar_simulacion(datos_guardar)
-    if fuente_tna == "IOL_WEB":
-        guardar_tasa_historica(tna, fuente_tna)
+    # La tasa ya se guarda dentro del loop por plazo — no duplicar aqui.
 
     if tiene_senal:
         ok = guardar_senal_db(tna, promedio or 0, desviacion_pct, capital,
