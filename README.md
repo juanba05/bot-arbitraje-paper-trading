@@ -1,9 +1,10 @@
-# Bot de Cauciones IOL — Automatización Financiera en Python
+# Bot de Cauciones — Carry Trade Automatizado en Python
 
 Sistema de trading automatizado para el mercado financiero argentino.
-Analiza oportunidades de caución colocadora en IOL (InvertirOnline),
-toma decisiones con lógica multi-plazo y ejecuta órdenes reales de forma
-autónoma mediante automatización de navegador.
+Captura oportunidades de carry trade mediante cauciones colocadoras en IOL
+(InvertirOnline): analiza tasas en tiempo real, toma decisiones con lógica
+multi-plazo y ejecuta órdenes reales de forma autónoma mediante
+automatización de navegador.
 
 ---
 
