@@ -51,3 +51,10 @@ $RECYCLE.BIN/
 
 # Excel de ratios (datos propios)
 ratios_comafi.xlsx
+
+# Archivos sensibles sueltos en raiz
+CONTEXTO_PROYECTO.txt
+gitignore
+
+# Claude Code (configuracion del agente)
+.claude/
