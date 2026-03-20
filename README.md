@@ -8,6 +8,52 @@ automatización de navegador.
 
 ---
 
+## La Idea: Capturar Picos de Liquidez en el Cierre de Rueda
+
+Las cauciones colocadoras son operaciones de pase a corto plazo: el inversor presta
+pesos a cambio de una tasa (TNA) y recibe el capital más intereses al vencimiento.
+Son uno de los instrumentos más líquidos del mercado argentino.
+
+**El fenómeno que explota este bot:**
+
+En las horas finales de la rueda bursátil, una parte de los participantes del
+mercado —fondos comunes, carteras apalancadas, operadores institucionales— necesita
+cerrar posiciones o cumplir compromisos de liquidez antes del cierre del día.
+Cuando ese proceso se acelera (liquidaciones forzadas, rebalanceos de cartera,
+rescates de cuotapartes), la demanda de efectivo a corto plazo sube abruptamente
+y los tomadores de cauciones están dispuestos a pagar tasas más altas que las del
+resto de la jornada para conseguir pesos de forma inmediata.
+
+Esos picos son reales, recurrentes y estadísticamente medibles. Durante la jornada
+normal la TNA puede moverse en un rango estable; en los últimos 30-60 minutos antes
+del cierre puede saltar 5 a 15 puntos porcentuales por encima del promedio histórico
+de la misma franja horaria.
+
+**Cómo lo captura el bot:**
+
+1. **Construye una baseline histórica** por plazo, hora del día y día de semana.
+   Así compara una tasa del jueves a las 16:45 contra el promedio de todos los
+   jueves a las 16:45, no contra el promedio general.
+
+2. **Detecta desvíos estadísticos**: solo dispara una orden cuando la tasa supera
+   la baseline en un umbral configurable (default: 20% por encima del promedio).
+   Una tasa del 24% cuando el promedio histórico es 20% a esa hora representa
+   exactamente el tipo de anomalía que el bot busca.
+
+3. **Ejecuta en segundos**: al detectar el desvío, completa el formulario web de IOL
+   de forma autónoma —monto, plazo, TNA mínima, confirmación con contraseña— sin
+   intervención humana, para capturar la tasa antes de que el pico se normalice.
+
+4. **Cierra el ciclo**: al vencimiento (1 a 7 días), el capital más los intereses
+   vuelven a la cuenta y el bot queda disponible para la siguiente oportunidad.
+
+El resultado es una estrategia de carry sistemática que se activa selectivamente:
+no coloca a cualquier tasa, sino solo cuando el mercado está pagando por encima de
+lo que históricamente paga a esa hora. El margen entre la tasa capturada y la tasa
+promedio es el alpha que justifica la automatización.
+
+---
+
 ## Qué hace
 
 - **Monitorea tasas de caución en tiempo real** obteniendo datos directamente
