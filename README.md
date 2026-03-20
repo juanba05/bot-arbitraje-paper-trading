@@ -62,13 +62,12 @@ SQLite: datos/bot_arbitraje.db
 dashboard.py         ← Dash/Plotly, control bidireccional
 ```
 
-### Modos operativos (horario Buenos Aires)
+### Horario operativo (Buenos Aires)
 
-| Horario | Modo | Lógica |
-|---|---|---|
-| 11:00–15:00 | arbitraje | Spreads CEDEAR/NYSE |
-| 15:00–17:00 | mixto | CEDEARs + cauciones |
-| 17:00–17:15 | caucion | Solo cauciones (cierre) |
+| Horario | Lógica |
+|---|---|
+| 11:00–17:00 | Evaluación y colocación de cauciones (modo normal, 70% del capital) |
+| 17:00–17:15 | Ventana de cierre (100% del capital) |
 
 ---
 
@@ -85,9 +84,11 @@ dashboard.py         ← Dash/Plotly, control bidireccional
 
 **Lógica financiera multi-plazo**
 - Evaluación de plazos 1, 2 y 3 días según el calendario de vencimientos.
+- Plazo 7 días como fallback cuando IOL no ofrece plazos cortos (feriados,
+  fines de semana largos) y como disparo extraordinario si la tasa supera
+  la curva 1-3d por 8 puntos o 25%.
 - Cálculo de ganancia neta con comisión IOL e IVA incluidos.
-- Comparación con promedio histórico de 7 días para detectar desvíos.
-- Regla de 7 días habilitada solo ante saltos extraordinarios de tasa.
+- Comparación con promedio histórico por plazo, hora y día de semana.
 - Capital mínimo por plazo: el sistema no coloca si la comisión supera
   la ganancia bruta.
 
