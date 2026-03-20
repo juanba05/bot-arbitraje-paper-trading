@@ -456,48 +456,33 @@ def obtener_saldo_disponible():
 
 def calcular_plazo_optimo(ahora=None):
     """
-    Segun reglas de negocio:
-      Viernes → 3 dias habiles (vence martes)
-      Jueves  → 2 dias habiles (vence lunes)
-      Resto   → 1 dia habil
+    Busca el menor plazo (1..PLAZO_MAX_CAUCION dias calendario) cuyo
+    vencimiento (hoy + plazo dias) no caiga en sabado ni domingo.
+    IOL trabaja en dias calendario: plazo=1 desde un viernes vence sabado,
+    por eso filtramos aqui antes de consultar tasas.
     Devuelve (plazo_dias, fecha_vencimiento, descripcion)
     """
     if ahora is None:
         ahora = datetime.now()
 
-    dia_semana = ahora.weekday()  # 0=lun ... 4=vie, 5=sab, 6=dom
-
     # Finde → sin operacion
-    if dia_semana >= 5:
+    if ahora.weekday() >= 5:
         return None, None, "Fin de semana — mercado cerrado"
 
     # Fuera de horario BYMA (11-18hs)
     if ahora.hour < 11 or ahora.hour >= 18:
         return None, None, "Fuera de horario BYMA (11-18hs)"
 
-    # Calcular plazo segun dia
-    if dia_semana == 4:    # Viernes
-        plazo = 3
-        desc = "Viernes → 3 dias habiles (vence martes)"
-    elif dia_semana == 3:  # Jueves
-        plazo = 2
-        desc = "Jueves → 2 dias habiles (vence lunes)"
-    else:                  # Lun, Mar, Mie
-        plazo = 1
-        desc = "Dia normal → 1 dia habil"
+    nombres_dia = ["lun", "mar", "mie", "jue", "vie", "sab", "dom"]
+    for plazo in range(1, PLAZO_MAX_CAUCION + 1):
+        vencimiento = ahora.date() + timedelta(days=plazo)
+        if vencimiento.weekday() < 5:  # no sabado ni domingo
+            nombre = nombres_dia[vencimiento.weekday()]
+            return plazo, vencimiento, (
+                f"Plazo {plazo}d calendario — vence {nombre} {vencimiento.strftime('%d/%m')}"
+            )
 
-    # Respetar PLAZO_MAX_CAUCION del config
-    plazo = min(plazo, PLAZO_MAX_CAUCION)
-
-    # Calcular fecha de vencimiento saltando finde
-    vencimiento = ahora.date()
-    dias_sumados = 0
-    while dias_sumados < plazo:
-        vencimiento += timedelta(days=1)
-        if vencimiento.weekday() < 5:
-            dias_sumados += 1
-
-    return plazo, vencimiento, desc
+    return None, None, f"Sin plazo valido en rango 1-{PLAZO_MAX_CAUCION}d (todos en fin de semana)"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1167,7 +1152,13 @@ def analizar_cauciones(modo="auto", seniales_hoy=0):
         log_caucion.info(f"{'='*60}")
         return {"puede_operar": False, "motivo": desc_plazo}
 
-    plazos_disponibles = [p for p in (1, 2, 3) if p <= PLAZO_MAX_CAUCION]
+    # Solo plazos cuyo vencimiento (hoy + p dias calendario) no sea sabado ni domingo
+    hoy = ahora.date()
+    plazos_disponibles = [
+        p for p in (1, 2, 3)
+        if p <= PLAZO_MAX_CAUCION
+        and (hoy + timedelta(days=p)).weekday() < 5
+    ]
     fin_rueda = _es_fin_rueda_caucion(ahora)
 
     # Ventanas de cierre
@@ -1220,12 +1211,8 @@ def analizar_cauciones(modo="auto", seniales_hoy=0):
         # Guardar tasa historica para este plazo (asi aparece en el dashboard)
         guardar_tasa_historica(tna, fuente_tna, plazo_dias=plazo)
 
-        venc = ahora.date()
-        dias_sumados = 0
-        while dias_sumados < plazo:
-            venc += timedelta(days=1)
-            if venc.weekday() < 5:
-                dias_sumados += 1
+        # Vencimiento = hoy + plazo dias calendario (IOL usa dias calendario)
+        venc = ahora.date() + timedelta(days=plazo)
 
         rend = calcular_rendimiento_caucion(
             capital, tna, plazo, comision_pct_total=comision_pct_aplicada
@@ -1326,14 +1313,13 @@ def analizar_cauciones(modo="auto", seniales_hoy=0):
     if tna_7d is not None and TNA_MINIMA < tna_7d < TNA_MAXIMA_VALIDA:
         guardar_tasa_historica(tna_7d, "IOL_WEB", plazo_dias=7)
     no_hay_1_3d = not resultados_por_plazo  # IOL no ofrecio ningun plazo 1-3d
-    usar_7d = _es_salto_extraordinario_7d(max_tna_1_3, tna_7d) or es_ventana_7d or no_hay_1_3d
+    # 7d solo si su vencimiento (hoy + 7 calendario) no es sabado ni domingo
+    venc_7d = ahora.date() + timedelta(days=7)
+    if venc_7d.weekday() >= 5:
+        usar_7d = False
+    else:
+        usar_7d = _es_salto_extraordinario_7d(max_tna_1_3, tna_7d) or es_ventana_7d or no_hay_1_3d
     if usar_7d and tna_7d is not None and 0 < tna_7d < TNA_MAXIMA_VALIDA:
-        venc_7d = ahora.date()
-        dias_sumados = 0
-        while dias_sumados < 7:
-            venc_7d += timedelta(days=1)
-            if venc_7d.weekday() < 5:
-                dias_sumados += 1
 
         rend_7d = calcular_rendimiento_caucion(
             capital, tna_7d, 7, comision_pct_total=comision_pct_aplicada

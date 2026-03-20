@@ -190,10 +190,14 @@ if api_ok:
         data={"muestra": precios_det},
     )
 
-# 5) Cauciones reales (IOL web) — incluye 7d (unico disponible viernes/feriados)
+# 5) Cauciones reales (IOL web) — solo plazos que no vencen en finde de semana
+from datetime import date as _date, timedelta as _timedelta
+_hoy = _date.today()
 tasas = {}
 ok_plazos = 0
 for plazo in (1, 2, 3, 7):
+    if (_hoy + _timedelta(days=plazo)).weekday() >= 5:
+        continue  # venceria sabado o domingo — saltar
     try:
         tna = _obtener_tasa_iol_web(plazo_dias=plazo)
     except Exception:
@@ -205,7 +209,7 @@ for plazo in (1, 2, 3, 7):
 add_check(
     "cauciones_iol_web",
     ok_plazos >= 1,
-    f"Plazos con tasa real: {ok_plazos}/4 — {[f'{p}d={tasas[p]:.1f}%' for p in ('1','2','3','7') if tasas.get(p)]}",
+    f"Plazos validos con tasa: {ok_plazos} — {[f'{p}d={tasas[p]:.1f}%' for p in ('1','2','3','7') if tasas.get(p)]}",
     critical=True,
     data={"tasas_tna": tasas},
 )
